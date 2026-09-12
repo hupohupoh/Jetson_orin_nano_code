@@ -27,9 +27,13 @@ At 200 state frames/s and 50 command frames/s, the total framed traffic is appro
 
 ## Critical model-version warning
 
-The repository revision inspected for this package is commit `0de3d9b5b11af011eceefc1cc33c72c3d077acc4`. Its first observation is **IMU linear acceleration**, scaled by `0.1`. An older policy used base linear velocity instead.
-
-The current policy has 47 inputs. Use a checkpoint trained after changing the observation to acceleration and removing the fixed-zero lateral command.
+The interface matches `Humanoid_Robot_RSL_RL` commit
+`4eb3d5b4d72a792c610ad46f0a8c65b931ed3b22`: 49 observations and 12 actions.
+Use an ONNX export from that walking/stepping policy with its trained observation
+normalizer included if normalization was enabled. Existing 47/48-input models
+are incompatible; the runtime rejects them before opening the serial link.
+Model files are not replaced by this change. Input size alone does not establish
+compatibility: the observation order and training configuration must also match.
 
 ## Policy interface
 
@@ -41,9 +45,11 @@ The policy period is `0.005 s * decimation 4 = 0.020 s`, or 50 Hz.
 | 3:6 | 3 | IMU angular velocity in policy frame, rad/s |
 | 6:9 | 3 | Projected gravity: world-down unit vector in body/IMU frame |
 | 9:11 | 2 | Command `[vx, wz]` |
-| 11:23 | 12 | Joint position minus Isaac default position, radians |
-| 23:35 | 12 | Joint velocity, rad/s |
-| 35:47 | 12 | Previous raw ONNX action |
+| 11:12 | 1 | Constant default step distance: 0.08 m |
+| 12:13 | 1 | Crossing command: 0 (normal walking) |
+| 13:25 | 12 | Joint position minus Isaac default position, radians |
+| 25:37 | 12 | Joint velocity, rad/s |
+| 37:49 | 12 | Previous raw ONNX action |
 
 The ONNX output is converted to the Isaac joint target using:
 
@@ -63,7 +69,7 @@ humanoid_jetson_deploy/
 ├── protocol.py                  shared wire format implemented in Python
 ├── serial_link.py               background serial receiver and state freshness checks
 ├── imu_filter.py                quaternion-derived projected gravity
-├── policy_runner.py             ONNX loading and exact 47-value observation layout
+├── policy_runner.py             ONNX loading and exact 49-value observation layout
 ├── command_source.py            fixed or local UDP velocity command
 ├── main.py                      50 Hz deployment program
 ├── STM32H723_CubeMX_CubeIDE_Guide.md
@@ -114,7 +120,7 @@ python -m pip install onnxruntime numpy
 python tools/inspect_onnx.py /path/to/policy.onnx
 ```
 
-Expected model dimensions are one `[1, 47]` input and one `[1, 12]` output. The input/output names are detected automatically.
+Expected model dimensions are one `[1, 49]` input and one `[1, 12]` output. The input/output names are detected automatically.
 
 ## Step 2: copy the package and policy to Jetson
 
@@ -344,39 +350,28 @@ Required checks:
 
 The current simulation multiplies acceleration by `0.1` before it reaches the network. `policy_runner.py` applies that same scaling exactly once.
 
-## Step 9: camera velocity-command feedback
+## Step 9: constant forward walking (vision disconnected)
 
-The policy listens for camera/connector velocity commands on local UDP port
-5005 by default. Start it first:
-
-```bash
-python main.py \
-  --model policy.onnx \
-  --port /dev/ttyACM0
-```
-
-From the repository root, run the connector in a second terminal:
+Run from this directory with a freshly exported, compatible model:
 
 ```bash
-python connector.py --vision-port 5006 --policy-port 5005
+python main.py --model models/current_walking.onnx --port /dev/ttyACM0
 ```
 
-Then start the integrated vision producer in a third terminal:
+The default command is constant `[vx, vy, wz] = [0.4, 0, 0]` in m/s and
+rad/s. Step distance stays at `DEFAULT_STEP_DISTANCE = 0.08` m and crossing
+command stays at zero on every inference. There is no stop, turn, or bar sequence.
 
-```bash
-python vision/run_real_car.py
-```
+No camera, connector, UDP listener, or upstream-command timeout participates in
+this runtime. The vision and connector files remain available for future work.
+`--command-source` accepts only `fixed`; `--wz` accepts only zero.
+`--vx` can select another constant positive speed up to 1 m/s; 0.4 m/s
+matches the current training command. Zero, negative, and non-finite speeds
+are rejected. Old UDP options are no longer accepted.
 
-Vision sends `{vx, vy: 0, wz, qr}` to UDP port 5006. The connector validates and processes that output, then sends it to this policy receiver on port 5005. The current example processing function is in `connector.py`; it clamps the training ranges, forces `vy=0`, and forwards QR values `1`–`6` or `-1` when none is visible.
-
-Both connector and policy receiver independently force the velocity command to zero if new upstream messages stop for 250 ms. Commands are clamped to the training range: `vx=0..1 m/s`, `vy=0`, and `wz=-0.5..0.5 rad/s`.
-
-To test without camera feedback, explicitly select the fixed source:
-
-```bash
-python main.py --model policy.onnx --port /dev/ttyACM0 \
-  --command-source fixed --vx 0.2 --wz 0.0
-```
+Motor enable remains opt-in. Ctrl+C, timed-run completion, invalid/stale STM32
+state, and fault handling still disable the motors; these protections are
+independent of the policy's constant walking command.
 
 ## Live motor-position/IMU monitor and CSV log
 
@@ -443,7 +438,7 @@ Use a physical emergency stop and overhead support. First command the default po
 python main.py \
   --model policy.onnx \
   --port /dev/ttyACM0 \
-  --vx 0.0 \
+  --vx 0.4 \
   --wz 0.0 \
   --kp-scale 0.2 \
   --kd-scale 0.3 \
@@ -457,10 +452,10 @@ Recommended progression:
 1. Motors unpowered, communications test.
 2. One joint at a time, direction and zero verification.
 3. Default pose controller without ONNX.
-4. Policy while suspended, zero command.
+4. Policy while suspended, constant forward command.
 5. Feet lightly contacting the floor with overhead support.
 6. Small `vx`, approximately 0.15–0.25 m/s.
-7. Turning commands.
+7. Continue straight walking with zero yaw command.
 8. Unsupported operation only after reliable fault handling.
 
 ## Safety behavior
@@ -515,3 +510,4 @@ Confirm the Python and aarch64 environment. Do not install an x86 wheel. As an a
 ## Before real walking
 
 Resolve the mass discrepancy in the provided robot files. The supplied URDF totals approximately 4.19 kg, while the supplied CSV totals approximately 1.16 kg. Confirm which values match the built robot and the USD used for training. Also add sim-to-real randomization for actuator strength, gains, delay, joint zero error, sensor bias, mass/COM, and battery effects before expecting robust unsupported walking.
+

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the current 47-input humanoid ONNX policy and exchange data with STM32."""
+"""Run the current 49-input humanoid ONNX policy and exchange data with STM32."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import time
 import numpy as np
 
 import config
-from command_source import FixedCommandSource, UdpCommandSource
+from command_source import FixedCommandSource
 from imu_filter import (
     projected_gravity_from_quaternion,
     roll_pitch_yaw_from_quaternion,
@@ -35,20 +35,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baud", type=int, default=921600)
     parser.add_argument(
         "--command-source",
-        choices=("vision", "fixed"),
-        default="vision",
-        help="Use camera/connector UDP feedback (default) or an explicit fixed test command",
+        choices=("fixed",),
+        default="fixed",
+        help="Fixed walking only; vision input is disconnected for this test",
     )
-    parser.add_argument("--udp-command-bind", default="127.0.0.1")
-    parser.add_argument("--udp-command-port", type=int, default=5005)
     parser.add_argument(
-        "--command-timeout",
-        type=float,
-        default=0.25,
-        help="Command zero velocity when connector feedback is stale for this many seconds",
+        "--vx", type=float, default=config.DEFAULT_FORWARD_VELOCITY,
+        help="Constant forward command in m/s (positive, at most 1.0)",
     )
-    parser.add_argument("--vx", type=float, default=0.2, help="Fixed-test forward command in m/s")
-    parser.add_argument("--wz", type=float, default=0.5, help="Fixed-test yaw-rate command in rad/s")
+    parser.add_argument(
+        "--wz", type=float, choices=(0.0,), default=0.0,
+        help="Yaw-rate command must remain zero for this walking test",
+    )
     parser.add_argument("--kp-scale", type=float, default=1.0)
     parser.add_argument("--kd-scale", type=float, default=1.0)
     parser.add_argument("--enable-motors", action="store_true")
@@ -114,10 +112,8 @@ def main() -> int:
         raise SystemExit("plot-every must be at least 1")
     if args.plot_history_seconds <= 0.0:
         raise SystemExit("plot-history-seconds must be positive")
-    if not 1 <= args.udp_command_port <= 65535:
-        raise SystemExit("udp-command-port must be between 1 and 65535")
-    if args.command_timeout <= 0.0:
-        raise SystemExit("command-timeout must be positive")
+    if not np.isfinite(args.vx) or not 0.0 < args.vx <= 1.0:
+        raise SystemExit("vx must be finite and in (0, 1] for constant forward walking")
 
     stop_requested = False
 
@@ -129,21 +125,12 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
 
     policy = HumanoidPolicy(args.model)
-    if args.command_source == "vision":
-        command_source = UdpCommandSource(
-            args.udp_command_port,
-            timeout_s=args.command_timeout,
-            bind=args.udp_command_bind,
-        )
-        command_source_description = (
-            f"camera/connector feedback on udp://{args.udp_command_bind}:"
-            f"{args.udp_command_port} (stale timeout {args.command_timeout:.3f}s)"
-        )
-    else:
-        command_source = FixedCommandSource(args.vx, args.wz)
-        command_source_description = (
-            f"fixed test command vx={args.vx:+.3f} m/s, wz={args.wz:+.3f} rad/s"
-        )
+    command_source = FixedCommandSource(args.vx, 0.0)
+    command_source_description = (
+        f"fixed walking vx={args.vx:+.3f} m/s, vy=0, wz=0; "
+        f"step_distance={config.DEFAULT_STEP_DISTANCE:.3f} m, crossing=0; "
+        "vision disconnected"
+    )
     position_logger = PositionCsvLogger(args.position_log_dir, config.JOINT_NAMES)
     position_plot = None
     if not args.no_plot:
@@ -312,3 +299,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

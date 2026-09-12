@@ -17,13 +17,25 @@ class HumanoidPolicy:
             raise RuntimeError("Expected an ONNX policy with one input and one output")
         self.input = self.session.get_inputs()[0]
         self.output = self.session.get_outputs()[0]
+        if (
+            self.input.type != "tensor(float)"
+            or len(self.input.shape) != 2
+            or self.input.shape[1] != config.OBS_DIM
+            or (isinstance(self.input.shape[0], int) and self.input.shape[0] != 1)
+        ):
+            raise RuntimeError(
+                f"Expected float32 ONNX input [1, {config.OBS_DIM}] "
+                f"(dynamic batch allowed), received {self.input.type} {self.input.shape}. "
+                "Export the current walking/stepping policy; legacy walking-test "
+                "models are incompatible."
+            )
         self.input_name = self.input.name
         self.output_name = self.output.name
         self.last_action = np.zeros(config.ACTION_DIM, dtype=np.float32)
 
         probe = np.zeros((1, config.OBS_DIM), dtype=np.float32)
         result = self.session.run([self.output_name], {self.input_name: probe})[0]
-        if result.shape != (1, config.ACTION_DIM):
+        if result.shape != (1, config.ACTION_DIM) or not np.isfinite(result).all():
             raise RuntimeError(f"Expected ONNX output (1, 12), received {result.shape}")
 
     def reset(self) -> None:
@@ -56,6 +68,10 @@ class HumanoidPolicy:
                 np.asarray(gyro_rad_s, dtype=np.float32),
                 np.asarray(projected_gravity, dtype=np.float32),
                 policy_velocity_command,
+                np.array(
+                    [config.DEFAULT_STEP_DISTANCE, config.CROSSING_COMMAND],
+                    dtype=np.float32,
+                ),
                 q_rel,
                 np.asarray(joint_velocity_policy, dtype=np.float32),
                 self.last_action,
@@ -82,3 +98,4 @@ class HumanoidPolicy:
         q_target = config.Q_DEFAULT + config.ACTION_SCALE * action
         self.last_action = action.copy()
         return q_target, action, obs, latency_ms
+
