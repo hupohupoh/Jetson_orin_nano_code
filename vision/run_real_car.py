@@ -67,9 +67,9 @@ RATE_LIM  = float(os.environ.get("JETSON_STEER_RATE_LIMIT", "5.0"))
 ST2SPD_EXP = float(os.environ.get("JETSON_STEER_SPEED_EXP", "1.0"))
 
 # Speed (real car — cm/s)
-BASE_SPD  = float(os.environ.get("REAL_CAR_SPEED",       "15.0"))
-MIN_SPD   = float(os.environ.get("REAL_CAR_MIN_SPEED",   "5.0"))
-LOST_SPD  = float(os.environ.get("REAL_CAR_LOST_SCALE",  "0.92"))
+BASE_SPD  = float(os.environ.get("REAL_CAR_SPEED",       "40.0"))
+MIN_SPD   = float(os.environ.get("REAL_CAR_MIN_SPEED",   "40.0"))
+LOST_SPD  = float(os.environ.get("REAL_CAR_LOST_SCALE",  "0"))
 
 # Lost recovery
 HOLD_FRAMES = int(os.environ.get("LOST_HOLD_FRAMES", "6"))
@@ -90,7 +90,7 @@ SERIAL_ENABLED = os.environ.get("SERIAL_ENABLED", "0") == "1"
 CONNECTOR_ENABLED = os.environ.get("CONNECTOR_ENABLED", "1") == "1"
 CONNECTOR_HOST = os.environ.get("CONNECTOR_HOST", "127.0.0.1")
 CONNECTOR_PORT = int(os.environ.get("CONNECTOR_PORT", "5006"))
-VISION_MAX_WZ = float(os.environ.get("VISION_MAX_WZ", "0.5"))
+VISION_MAX_WZ = float(os.environ.get("VISION_MAX_WZ", "1.5"))
 # Flip this to -1 if a positive vision steer turns opposite to positive policy yaw.
 VISION_WZ_SIGN = float(os.environ.get("VISION_WZ_SIGN", "1.0"))
 
