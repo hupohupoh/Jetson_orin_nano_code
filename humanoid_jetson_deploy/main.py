@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the current 49-input humanoid ONNX policy and exchange data with STM32."""
+"""Run a walking or one-foot standing ONNX policy and exchange data with STM32."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from imu_filter import (
     validate_stationary_imu_sample,
 )
 from policy_runner import HumanoidPolicy
+from one_foot_policy import OneFootCommand, OneFootPolicy
 from position_monitor import LivePositionPlot, PositionCsvLogger
 from protocol import (
     COMMAND_ENABLE,
@@ -31,17 +32,33 @@ from serial_link import SerialLink
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="Path to policy.onnx")
+    parser.add_argument(
+        "--policy", choices=("walking", "one-foot"), default="walking",
+        help="Observation/action interface: walking=49 inputs, one-foot=46 inputs",
+    )
+    parser.add_argument(
+        "--support-foot", choices=("right", "left"), default="right",
+        help="One-foot mode: supporting foot (the opposite foot lifts)",
+    )
+    parser.add_argument(
+        "--stand-seconds", type=float, default=1.0,
+        help="One-foot mode: initial command-zero duration (seconds)",
+    )
+    parser.add_argument(
+        "--lift-seconds", type=float, default=4.0,
+        help="One-foot mode: command-one duration, then command zero until exit",
+    )
     parser.add_argument("--port", default="/dev/ttyACM0", help="STM32 serial device")
     parser.add_argument("--baud", type=int, default=921600)
     parser.add_argument(
         "--command-source",
         choices=("fixed",),
         default="fixed",
-        help="Fixed walking only; vision input is disconnected for this test",
+        help="Fixed walking only; neither policy mode uses vision input",
     )
     parser.add_argument(
         "--vx", type=float, default=config.DEFAULT_FORWARD_VELOCITY,
-        help="Constant forward command in m/s (positive, at most 1.0)",
+        help="Walking only: constant forward command in m/s (positive, at most 1.0)",
     )
     parser.add_argument(
         "--wz", type=float, choices=(0.0,), default=0.0,
@@ -112,7 +129,7 @@ def main() -> int:
         raise SystemExit("plot-every must be at least 1")
     if args.plot_history_seconds <= 0.0:
         raise SystemExit("plot-history-seconds must be positive")
-    if not np.isfinite(args.vx) or not 0.0 < args.vx <= 1.0:
+    if args.policy == "walking" and (not np.isfinite(args.vx) or not 0.0 < args.vx <= 1.0):
         raise SystemExit("vx must be finite and in (0, 1] for constant forward walking")
 
     stop_requested = False
@@ -124,13 +141,25 @@ def main() -> int:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
-    policy = HumanoidPolicy(args.model)
-    command_source = FixedCommandSource(args.vx, 0.0)
-    command_source_description = (
-        f"fixed walking vx={args.vx:+.3f} m/s, vy=0, wz=0; "
-        f"step_distance={config.DEFAULT_STEP_DISTANCE:.3f} m, crossing=0; "
-        "vision disconnected"
-    )
+    if args.policy == "one-foot":
+        try:
+            command_source = OneFootCommand(args.stand_seconds, args.lift_seconds)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        policy = OneFootPolicy(args.model, support_foot=args.support_foot)
+        command_source_description = (
+            f"one-foot standing, support={args.support_foot}; "
+            f"stand {args.stand_seconds:g}s -> lift {args.lift_seconds:g}s -> lower/stand; "
+            "vision disconnected; no velocity, step-distance, or crossing observations"
+        )
+    else:
+        policy = HumanoidPolicy(args.model)
+        command_source = FixedCommandSource(args.vx, 0.0)
+        command_source_description = (
+            f"fixed walking vx={args.vx:+.3f} m/s, vy=0, wz=0; "
+            f"step_distance={config.DEFAULT_STEP_DISTANCE:.3f} m, crossing=0; "
+            "vision disconnected"
+        )
     position_logger = PositionCsvLogger(args.position_log_dir, config.JOINT_NAMES)
     position_plot = None
     if not args.no_plot:
@@ -144,7 +173,7 @@ def main() -> int:
             ) from exc
 
     print(f"ONNX input={policy.input_name!r}, output={policy.output_name!r}")
-    print(f"Velocity command source: {command_source_description}")
+    print(f"Policy command source: {command_source_description}")
     print(f"Opening {args.port} (line coding {args.baud}; native USB CDC ignores physical baud)")
     print("MOTORS ENABLED" if args.enable_motors else "DRY RUN: command enable flag is OFF")
     print(f"Motor-position and IMU log: {position_logger.path}")
@@ -212,13 +241,24 @@ def main() -> int:
                 config.IMU_TO_POLICY,
                 sensor_to_world=config.IMU_QUATERNION_IS_SENSOR_TO_WORLD,
             )
-            velocity_command = command_source.get()
+            if args.policy == "one-foot":
+                lift_command = command_source.get(now - start_time)
+                command_values = {"lift_command": lift_command}
+                command_status = f"lift_command={int(lift_command)} support={args.support_foot} "
+            else:
+                velocity_command = command_source.get()
+                command_values = {"velocity_command": velocity_command}
+                command_status = (
+                    f"policy_target_velocity=[vx={velocity_command[0]:+.3f} m/s, "
+                    f"vy={velocity_command[1]:+.3f} m/s, "
+                    f"wz={velocity_command[2]:+.3f} rad/s] "
+                )
 
             q_policy_target, action, obs, latency_ms = policy.step(
                 accel_m_s2=accel_policy,
                 gyro_rad_s=gyro_policy,
                 projected_gravity=projected_gravity,
-                velocity_command=velocity_command,
+                **command_values,
                 joint_position_policy=q_policy,
                 joint_velocity_policy=qd_policy,
             )
@@ -259,9 +299,7 @@ def main() -> int:
             if step % max(1, args.log_every) == 0:
                 print(
                     f"step={step:6d} state_seq={state.sequence:5d} "
-                    f"policy_target_velocity=[vx={velocity_command[0]:+.3f} m/s, "
-                    f"vy={velocity_command[1]:+.3f} m/s, "
-                    f"wz={velocity_command[2]:+.3f} rad/s] "
+                    f"{command_status}"
                     f"infer={latency_ms:.3f}ms |obs|max={np.max(np.abs(obs)):.3f} "
                     f"|action|max={np.max(np.abs(action)):.3f} "
                     f"crc_errors={link.decoder.crc_errors}"
@@ -284,7 +322,8 @@ def main() -> int:
         position_logger.close()
         if position_plot is not None and not timed_run_completed:
             position_plot.close()
-        command_source.close()
+        if args.policy == "walking":
+            command_source.close()
         link.close()
 
     print("Policy stopped; disable packets sent")
@@ -299,4 +338,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
