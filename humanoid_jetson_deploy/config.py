@@ -6,12 +6,17 @@ import numpy as np
 
 
 NUM_JOINTS = 12
-OBS_DIM = 47
+OBS_DIM = 49
 ACTION_DIM = 12
 POLICY_HZ = 50.0
 POLICY_DT = 1.0 / POLICY_HZ
 ACTION_SCALE = 0.25
 ACCEL_OBS_SCALE = 0.1
+
+# Humanoid_Robot_RSL_RL main at 4eb3d5b4d72a792c610ad46f0a8c65b931ed3b22.
+DEFAULT_STEP_DISTANCE = 0.08  # metres, signed longitudinal touchdown target
+DEFAULT_FORWARD_VELOCITY = 0.4  # m/s, standard walking command
+CROSSING_COMMAND = 0.0  # normal walking only
 
 JOINT_NAMES = (
     "r_leg_pitch_joint",
@@ -182,3 +187,4 @@ def clamp_policy_target_to_current(
             "configured joint limits"
         )
     return np.clip(q_target, lower, upper)
+

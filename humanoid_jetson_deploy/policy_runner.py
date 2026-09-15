@@ -11,19 +11,33 @@ import config
 
 
 class HumanoidPolicy:
+    obs_dim = config.OBS_DIM
+    model_description = "current walking/stepping policy; legacy walking-test models are incompatible"
+
     def __init__(self, model_path: str) -> None:
         self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         if len(self.session.get_inputs()) != 1 or len(self.session.get_outputs()) != 1:
             raise RuntimeError("Expected an ONNX policy with one input and one output")
         self.input = self.session.get_inputs()[0]
         self.output = self.session.get_outputs()[0]
+        if (
+            self.input.type != "tensor(float)"
+            or len(self.input.shape) != 2
+            or self.input.shape[1] != self.obs_dim
+            or (isinstance(self.input.shape[0], int) and self.input.shape[0] != 1)
+        ):
+            raise RuntimeError(
+                f"Expected float32 ONNX input [1, {self.obs_dim}] "
+                f"(dynamic batch allowed), received {self.input.type} {self.input.shape}. "
+                f"Export the {self.model_description}."
+            )
         self.input_name = self.input.name
         self.output_name = self.output.name
         self.last_action = np.zeros(config.ACTION_DIM, dtype=np.float32)
 
-        probe = np.zeros((1, config.OBS_DIM), dtype=np.float32)
+        probe = np.zeros((1, self.obs_dim), dtype=np.float32)
         result = self.session.run([self.output_name], {self.input_name: probe})[0]
-        if result.shape != (1, config.ACTION_DIM):
+        if result.shape != (1, config.ACTION_DIM) or not np.isfinite(result).all():
             raise RuntimeError(f"Expected ONNX output (1, 12), received {result.shape}")
 
     def reset(self) -> None:
@@ -56,29 +70,38 @@ class HumanoidPolicy:
                 np.asarray(gyro_rad_s, dtype=np.float32),
                 np.asarray(projected_gravity, dtype=np.float32),
                 policy_velocity_command,
+                np.array(
+                    [config.DEFAULT_STEP_DISTANCE, config.CROSSING_COMMAND],
+                    dtype=np.float32,
+                ),
                 q_rel,
                 np.asarray(joint_velocity_policy, dtype=np.float32),
                 self.last_action,
             )
         ).astype(np.float32)
 
-        if obs.shape != (config.OBS_DIM,):
+        if obs.shape != (self.obs_dim,):
             raise RuntimeError(
-                f"Observation shape is {obs.shape}; expected ({config.OBS_DIM},)"
+                f"Observation shape is {obs.shape}; expected ({self.obs_dim},)"
             )
         if not np.isfinite(obs).all():
             raise RuntimeError("Observation contains a non-finite value")
         return obs
 
+    def action_to_target(self, action: np.ndarray) -> np.ndarray:
+        return config.Q_DEFAULT + config.ACTION_SCALE * action
+
     def step(self, **observation_values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
         obs = self.build_observation(**observation_values)
         start_ns = time.perf_counter_ns()
         action = self.session.run(
-            [self.output_name], {self.input_name: obs.reshape(1, config.OBS_DIM)}
+            [self.output_name], {self.input_name: obs.reshape(1, self.obs_dim)}
         )[0][0].astype(np.float32)
         latency_ms = (time.perf_counter_ns() - start_ns) * 1.0e-6
         if action.shape != (config.ACTION_DIM,) or not np.isfinite(action).all():
             raise RuntimeError("Invalid ONNX policy output")
-        q_target = config.Q_DEFAULT + config.ACTION_SCALE * action
+        q_target = self.action_to_target(action)
         self.last_action = action.copy()
         return q_target, action, obs, latency_ms
+
+

@@ -1,127 +1,93 @@
 # Jetson Orin Nano humanoid runtime
 
-This repository contains the vision/navigation code and the ONNX walking-policy
-runtime. `connector.py` links them while keeping camera processing and the 50 Hz
-policy loop in separate processes.
+The runtime supports standard forward walking from `Humanoid_Robot_RSL_RL`
+and one-foot standing from `Humanoid_Robot_One_Foot_Standing`. Select the
+interface with `--policy walking` (default) or `--policy one-foot`.
+Vision is disconnected in both modes.
 
-## Data flow
+Walking defaults:
 
-```text
-vision/run_real_car.py
-  -> UDP 5006: {vx, vy: 0, wz, qr}
-connector.py
-  -> validate/process, force vy=0, apply stale-input stop
-  -> UDP 5005: {vx, vy: 0, wz, qr}
-humanoid_jetson_deploy/main.py
-  -> command observation [vx, 0, wz]
-  -> ONNX policy -> STM32 motor targets
-```
+- 49 observations, including step distance and crossing command.
+- Constant forward velocity: **0.4 m/s** by default; lateral velocity and yaw rate: **0**.
+- Constant default step distance: **0.08 m**; crossing command: **0**.
+- 50 Hz inference, 12 joint-position actions, action scale 0.25.
+- No automatic stop, turn, bar-crossing command, or UDP vision listener.
+- Existing motor enable, state watchdog, joint limits, and emergency shutdown remain active.
 
-The QR value is `1` through `6` while a valid code is visible and `-1` when no
-QR code is visible. The current example connector forwards the QR value but the
-policy consumes only `[vx, vy, wz]`. Add future QR behavior in
-`process_vision_output()` in `connector.py`.
+These values match training commit `4eb3d5b4d72a792c610ad46f0a8c65b931ed3b22`.
+The joint order, default pose, and IMU acceleration scaling are unchanged.
 
-## Run the camera velocity feedback loop
+## Run walking
 
-Camera/connector feedback is now the policy's default velocity-command source.
-Open three terminals in the repository root and activate the same Python
-environment in each.
-
-1. Start the policy receiver:
-
-   ```bash
-   cd humanoid_jetson_deploy
-   python main.py --model policy.onnx --port /dev/ttyACM0
-   ```
-
-   Omit `--enable-motors` until the complete dry-run and calibration procedure
-   in `humanoid_jetson_deploy/README.md` has passed.
-
-2. Start the connector:
-
-   ```bash
-   python connector.py --vision-port 5006 --policy-port 5005
-   ```
-
-3. Start vision:
-
-   ```bash
-   python vision/run_real_car.py
-   ```
-
-The connector publishes at 50 Hz independently of the camera rate. It uses a
-zero-order hold: if vision produces one command every 0.1 seconds (10 Hz), the
-connector republishes that same command about five times so the policy receives
-a target on every 50 Hz inference step. If vision messages stop for more than
-250 ms, it publishes `[0, 0, 0]`; the policy receiver also has its own 250 ms
-UDP watchdog.
-
-The policy process also opens a live target-versus-actual motor-position and
-IMU window (knees and IMU data selected by default). It records all 12
-target/actual positions, IMU acceleration, and fused roll/pitch/yaw to a
-timestamped CSV in `humanoid_jetson_deploy/logs/motor_positions/`. Use the
-window checkboxes to select motors or toggle the acceleration/orientation
-groups, or add `--no-plot` in a headless session; logging stays enabled.
-
-After a timed run, the plot remains open until it is closed manually. From the
-`humanoid_jetson_deploy` directory, run `python tools/view_position_log.py` to
-open the newest saved CSV, or pass a CSV path to inspect a specific run.
-
-The STM32 serial connection is still required because it supplies IMU/joint
-state and receives motor targets. For a test without camera feedback, explicitly
-select the fixed command source:
+Export the current walking/stepping checkpoint to ONNX and copy it to
+`humanoid_jetson_deploy/models/current_walking.onnx`. Include its trained
+observation normalizer in the export if normalization was enabled.
+Existing model binaries are not updated in this change. Legacy 47/48-input
+walking-test models are rejected; a 49-input model must also have the documented
+observation semantics.
 
 ```bash
 cd humanoid_jetson_deploy
-python main.py --model policy.onnx --port /dev/ttyACM0 \
-  --command-source fixed --vx 0.2 --wz 0.0
+python main.py --model models/current_walking.onnx --port /dev/ttyACM0
 ```
 
-## Debug the target velocity
+Motor output remains disabled unless `--enable-motors` is passed.
+Follow the calibration and motor-test procedure in
+[the deployment guide](humanoid_jetson_deploy/README.md).
+Add `--no-plot` for headless operation; CSV position and IMU logging stays enabled.
+`--max-seconds` ends a timed run and disables motors as before.
 
-All three stages print clearly labeled target values:
+`--vx` selects a constant positive speed (at most 1 m/s), defaulting to 0.4.
+`--command-source` accepts only `fixed`, and `--wz` accepts only 0.
+The step distance remains the configured default for the entire run.
 
-```text
-vision_target_velocity=[vx=+0.150 m/s, vy=+0.000 m/s, wz=-0.200 rad/s]
-[connector -> policy] ... target_velocity=[vx=+0.150 m/s, vy=+0.000 m/s, wz=-0.200 rad/s]
-policy_target_velocity=[vx=+0.150 m/s, vy=+0.000 m/s, wz=-0.200 rad/s]
-```
+## Run one-foot standing
 
-By default, connector and policy logs appear every 25 steps (twice per second at
-50 Hz). For short debugging runs, print every 50 Hz step with:
+Export your one-foot standing checkpoint and copy it to
+`humanoid_jetson_deploy/models/one_foot.onnx`. This model is not bundled.
+From the repository root:
 
 ```bash
-python connector.py --vision-port 5006 --policy-port 5005 --log-every 1
-
 cd humanoid_jetson_deploy
-python main.py --model policy.onnx --port /dev/ttyACM0 \
-  --udp-command-port 5005 --log-every 1
+python main.py --policy one-foot --model models/one_foot.onnx --port /dev/ttyACM0 --enable-motors --max-seconds 8
 ```
 
-Printing at 50 Hz adds terminal overhead, so use the default interval for normal
-operation.
+The default sequence is command **0** for 1 second, **1** for 4 seconds,
+then **0** until exit. This commands the left foot to lift with right-foot
+support. Use `--stand-seconds` and `--lift-seconds` to change the durations.
+There is one sequence per process run; it does not repeat or reset the physical
+robot at 8 seconds. `--max-seconds 8` ends this example after the lowering phase
+and disables motors. Omit it to continue the standing command until Ctrl+C.
 
-## Command conversion and calibration
+`--support-foot left` selects left support/right lift with the training code's
+observation and action mirroring. Right support is the default because current
+training disables left/right switching. The side remains fixed throughout a run.
+`--vx`, `--wz`, and `--command-source` do not supply observations to this mode.
+Add `--no-plot` for headless operation.
 
-`run_real_car.py` converts its existing forward target from cm/s to m/s. Its
-steering output is not a measured angular velocity, so it is normalized and
-mapped into the policy range. Configure the mapping with:
+The 46-input layout and side transforms match training commit
+`c1b4e8c8bdedafc8c7fd4c162a7c3c9e0a28df9f`; see
+[the one-foot interface](humanoid_jetson_deploy/README.md#one-foot-standing-interface)
+for the exact order. The runtime rejects a walking model selected for one-foot
+mode before opening the serial port.
 
-```bash
-VISION_MAX_WZ=0.3 VISION_WZ_SIGN=1 python vision/run_real_car.py
-```
+Hardware testing is complete as confirmed by the owner:
+`CALIBRATION_CONFIRMED = True` and `IMU_CALIBRATION_CONFIRMED = True` are
+already set in `config.py` and remain so. `--enable-motors` enables motor
+output for the requested run; omitting it keeps the existing dry-run behavior.
 
-Use `VISION_WZ_SIGN=-1` if the robot turns opposite to the detected direction.
-Calibrate this with the robot supported and motors at reduced gains.
+## Vision code
 
-Useful network settings are `CONNECTOR_ENABLED`, `CONNECTOR_HOST`, and
-`CONNECTOR_PORT`. All sockets bind to localhost by default, so no external
-network access or ROS installation is required.
+`vision/`, `connector.py`, and the reusable UDP command source remain in the
+repository, but `main.py` does not instantiate a UDP receiver or consume their
+output. Starting a camera/connector process cannot change this walking command.
+No camera process is needed to run the policy.
 
-## Test the connector logic
+## Tests
 
 ```bash
 python -m unittest discover -s tests -v
-python -m compileall -q connector.py vision humanoid_jetson_deploy
+cd humanoid_jetson_deploy
+python -m unittest discover -s tests -v
 ```
+

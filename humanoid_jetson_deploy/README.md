@@ -1,6 +1,7 @@
 # Humanoid Robot: Jetson Orin Nano ONNX Deployment
 
-This package runs the current `Humanoid_Robot_RSL_RL` policy on a Jetson Orin Nano and exchanges state/target data with an STM32. It is intentionally split into:
+This package runs the current `Humanoid_Robot_RSL_RL` walking policy or the
+`Humanoid_Robot_One_Foot_Standing` policy on a Jetson Orin Nano and exchanges state/target data with an STM32. It is intentionally split into:
 
 - **Jetson, 50 Hz:** observation construction, quaternion-derived projected gravity, ONNX inference, action scaling, joint limits, target transmission.
 - **STM32, 1 kHz:** encoders, IMU acquisition, motor position/PD control, current limits, communications watchdog, emergency stop.
@@ -25,13 +26,17 @@ The state payload is 144 bytes and its complete frame is 154 bytes. The command 
 
 At 200 state frames/s and 50 command frames/s, the total framed traffic is approximately 34.5 kB/s, comfortably within USB full-speed CDC capacity.
 
-## Critical model-version warning
+## Walking model compatibility
 
-The repository revision inspected for this package is commit `0de3d9b5b11af011eceefc1cc33c72c3d077acc4`. Its first observation is **IMU linear acceleration**, scaled by `0.1`. An older policy used base linear velocity instead.
+The interface matches `Humanoid_Robot_RSL_RL` commit
+`4eb3d5b4d72a792c610ad46f0a8c65b931ed3b22`: 49 observations and 12 actions.
+Use an ONNX export from that walking/stepping policy with its trained observation
+normalizer included if normalization was enabled. Existing 47/48-input models
+are incompatible; the runtime rejects them before opening the serial link.
+Model files are not replaced by this change. Input size alone does not establish
+compatibility: the observation order and training configuration must also match.
 
-The current policy has 47 inputs. Use a checkpoint trained after changing the observation to acceleration and removing the fixed-zero lateral command.
-
-## Policy interface
+## Walking policy interface
 
 The policy period is `0.005 s * decimation 4 = 0.020 s`, or 50 Hz.
 
@@ -41,9 +46,11 @@ The policy period is `0.005 s * decimation 4 = 0.020 s`, or 50 Hz.
 | 3:6 | 3 | IMU angular velocity in policy frame, rad/s |
 | 6:9 | 3 | Projected gravity: world-down unit vector in body/IMU frame |
 | 9:11 | 2 | Command `[vx, wz]` |
-| 11:23 | 12 | Joint position minus Isaac default position, radians |
-| 23:35 | 12 | Joint velocity, rad/s |
-| 35:47 | 12 | Previous raw ONNX action |
+| 11:12 | 1 | Constant default step distance: 0.08 m |
+| 12:13 | 1 | Crossing command: 0 (normal walking) |
+| 13:25 | 12 | Joint position minus Isaac default position, radians |
+| 25:37 | 12 | Joint velocity, rad/s |
+| 37:49 | 12 | Previous raw ONNX action |
 
 The ONNX output is converted to the Isaac joint target using:
 
@@ -52,6 +59,72 @@ q_target_policy = q_default + 0.25 * action
 ```
 
 Observation noise used during training is **not** added during deployment.
+
+## One-foot standing interface
+
+Select `--policy one-foot` with an ONNX model exported from
+`Humanoid_Robot_One_Foot_Standing` commit
+`c1b4e8c8bdedafc8c7fd4c162a7c3c9e0a28df9f` (or a checkpoint with this exact
+interface). The model must accept one float32 `[1, 46]` input (dynamic batch
+allowed) and produce `[1, 12]` actions. The checked training configuration has
+actor observation normalization disabled; if your checkpoint enabled it,
+include that trained normalizer in the ONNX export.
+
+| Observation indices | Size | Value sent to ONNX |
+|---:|---:|---|
+| 0:3 | 3 | Canonical IMU acceleration, m/s² × 0.1 |
+| 3:6 | 3 | Canonical IMU angular velocity, rad/s |
+| 6:9 | 3 | Canonical projected gravity |
+| 9:10 | 1 | Binary `lift_one_foot_in_the_air` command |
+| 10:22 | 12 | Canonical joint position minus default pose, radians |
+| 22:34 | 12 | Canonical joint velocity, rad/s (default velocity is zero) |
+| 34:46 | 12 | Previous raw canonical ONNX action |
+
+There are no velocity, step-distance, or crossing-command observations and no
+history stacking. Joint order, default pose, acceleration scale, action scale
+0.25, and 50 Hz policy rate match the shared deployment constants.
+
+Right support/left lift uses physical policy-frame values directly. With
+`--support-foot left`, acceleration and gravity transform as `[x, -y, z]`,
+angular velocity as `[-x, y, -z]`, and joint offsets/velocities swap the six-joint
+right/left blocks and negate every coordinate. Actions undergo the same joint
+transformation before calculating `q_default + 0.25 * physical_action`.
+The previous-action observation always stores the raw canonical network output,
+before mirroring, scaling, or target limiting. Mirroring remains active for
+left support during command-zero phases too; side selection is not another
+network input.
+
+From this directory, after copying your exported model to `models/one_foot.onnx`:
+
+```bash
+python main.py --policy one-foot --model models/one_foot.onnx --enable-motors --max-seconds 8
+```
+
+Defaults are right support, 1 second standing, 4 seconds lifting, then the
+standing command until exit. Training currently uses a fixed 1-second initial
+stand and a random 3–5-second lift; deployment uses a reproducible 4-second lift.
+Change `--stand-seconds` and `--lift-seconds` as needed. Both must be finite and
+positive. The timer starts after valid startup state and IMU checks. Command zero
+after lifting asks the policy to lower the foot; it does not abruptly replace
+policy output with the default joint pose. No new episode or automatic repeat is
+introduced, and action history is retained across command changes. Use
+`--max-seconds 8` for an 8-second run or omit it to keep commanding standing.
+
+`--support-foot left` uses the opposite physical support side. The current
+training configuration has `ENABLE_LEFT_RIGHT_SWITCHING = False`, hence the
+right-support default. `--no-plot`, logging, gain scales, and serial options
+work in both modes. Console status shows the lift command and selected support
+foot. The existing target limits, slew/deviation limits, stale-state checks,
+fault shutdown, and STM32 protocol are shared by both modes.
+
+Both hardware calibration confirmations in `config.py` are already `True`, as
+requested after completed hardware testing. Motor output is enabled per run
+with `--enable-motors`. No new calibration gate is added. The training repository
+references a local `v3.1.usd`; this change retains the deployment's calibrated
+hardware mapping and existing limits documented as `v2.4.1.urdf`, and does not
+replace the robot asset or any ONNX binaries. Software tests use mocked model
+outputs and serial state; they do not validate a particular trained checkpoint
+or physical balance on the Jetson/robot.
 
 ## Files
 
@@ -63,7 +136,8 @@ humanoid_jetson_deploy/
 ├── protocol.py                  shared wire format implemented in Python
 ├── serial_link.py               background serial receiver and state freshness checks
 ├── imu_filter.py                quaternion-derived projected gravity
-├── policy_runner.py             ONNX loading and exact 47-value observation layout
+├── policy_runner.py             shared ONNX inference and walking observations
+├── one_foot_policy.py           46-value standing observations, mirroring, lift sequence
 ├── command_source.py            fixed or local UDP velocity command
 ├── main.py                      50 Hz deployment program
 ├── STM32H723_CubeMX_CubeIDE_Guide.md
@@ -114,7 +188,7 @@ python -m pip install onnxruntime numpy
 python tools/inspect_onnx.py /path/to/policy.onnx
 ```
 
-Expected model dimensions are one `[1, 47]` input and one `[1, 12]` output. The input/output names are detected automatically.
+Expected model dimensions are one `[1, 49]` input and one `[1, 12]` output. The input/output names are detected automatically.
 
 ## Step 2: copy the package and policy to Jetson
 
@@ -344,39 +418,28 @@ Required checks:
 
 The current simulation multiplies acceleration by `0.1` before it reaches the network. `policy_runner.py` applies that same scaling exactly once.
 
-## Step 9: camera velocity-command feedback
+## Step 9: constant forward walking (vision disconnected)
 
-The policy listens for camera/connector velocity commands on local UDP port
-5005 by default. Start it first:
-
-```bash
-python main.py \
-  --model policy.onnx \
-  --port /dev/ttyACM0
-```
-
-From the repository root, run the connector in a second terminal:
+Run from this directory with a freshly exported, compatible model:
 
 ```bash
-python connector.py --vision-port 5006 --policy-port 5005
+python main.py --model models/current_walking.onnx --port /dev/ttyACM0
 ```
 
-Then start the integrated vision producer in a third terminal:
+The default command is constant `[vx, vy, wz] = [0.4, 0, 0]` in m/s and
+rad/s. Step distance stays at `DEFAULT_STEP_DISTANCE = 0.08` m and crossing
+command stays at zero on every inference. There is no stop, turn, or bar sequence.
 
-```bash
-python vision/run_real_car.py
-```
+No camera, connector, UDP listener, or upstream-command timeout participates in
+this runtime. The vision and connector files remain available for future work.
+`--command-source` accepts only `fixed`; `--wz` accepts only zero.
+`--vx` can select another constant positive speed up to 1 m/s; 0.4 m/s
+matches the current training command. Zero, negative, and non-finite speeds
+are rejected. Old UDP options are no longer accepted.
 
-Vision sends `{vx, vy: 0, wz, qr}` to UDP port 5006. The connector validates and processes that output, then sends it to this policy receiver on port 5005. The current example processing function is in `connector.py`; it clamps the training ranges, forces `vy=0`, and forwards QR values `1`–`6` or `-1` when none is visible.
-
-Both connector and policy receiver independently force the velocity command to zero if new upstream messages stop for 250 ms. Commands are clamped to the training range: `vx=0..1 m/s`, `vy=0`, and `wz=-0.5..0.5 rad/s`.
-
-To test without camera feedback, explicitly select the fixed source:
-
-```bash
-python main.py --model policy.onnx --port /dev/ttyACM0 \
-  --command-source fixed --vx 0.2 --wz 0.0
-```
+Motor enable remains opt-in. Ctrl+C, timed-run completion, invalid/stale STM32
+state, and fault handling still disable the motors; these protections are
+independent of the policy's constant walking command.
 
 ## Live motor-position/IMU monitor and CSV log
 
@@ -443,7 +506,7 @@ Use a physical emergency stop and overhead support. First command the default po
 python main.py \
   --model policy.onnx \
   --port /dev/ttyACM0 \
-  --vx 0.0 \
+  --vx 0.4 \
   --wz 0.0 \
   --kp-scale 0.2 \
   --kd-scale 0.3 \
@@ -457,10 +520,10 @@ Recommended progression:
 1. Motors unpowered, communications test.
 2. One joint at a time, direction and zero verification.
 3. Default pose controller without ONNX.
-4. Policy while suspended, zero command.
+4. Policy while suspended, constant forward command.
 5. Feet lightly contacting the floor with overhead support.
 6. Small `vx`, approximately 0.15–0.25 m/s.
-7. Turning commands.
+7. Continue straight walking with zero yaw command.
 8. Unsupported operation only after reliable fault handling.
 
 ## Safety behavior
@@ -515,3 +578,5 @@ Confirm the Python and aarch64 environment. Do not install an x86 wheel. As an a
 ## Before real walking
 
 Resolve the mass discrepancy in the provided robot files. The supplied URDF totals approximately 4.19 kg, while the supplied CSV totals approximately 1.16 kg. Confirm which values match the built robot and the USD used for training. Also add sim-to-real randomization for actuator strength, gains, delay, joint zero error, sensor bias, mass/COM, and battery effects before expecting robust unsupported walking.
+
+
