@@ -10,7 +10,7 @@ import time
 import numpy as np
 
 import config
-from command_source import FixedCommandSource
+from command_source import FixedCommandSource, UdpCommandSource
 from imu_filter import (
     projected_gravity_from_quaternion,
     roll_pitch_yaw_from_quaternion,
@@ -52,17 +52,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baud", type=int, default=921600)
     parser.add_argument(
         "--command-source",
-        choices=("fixed",),
+        choices=("fixed", "vision"),
         default="fixed",
-        help="Fixed walking only; neither policy mode uses vision input",
+        help="Walking: fixed test command or new_vision/connector UDP commands",
     )
+    parser.add_argument("--udp-command-bind", default="127.0.0.1")
+    parser.add_argument("--udp-command-port", type=int, default=5005)
+    parser.add_argument("--command-timeout", type=float, default=0.25,
+                        help="Zero velocity after this many seconds without connector data")
+    parser.add_argument("--walk-seconds", type=float, default=5.0,
+                        help="Fixed mode only: command zero after this duration; 0 disables timer")
     parser.add_argument(
         "--vx", type=float, default=config.DEFAULT_FORWARD_VELOCITY,
-        help="Walking only: constant forward command in m/s (positive, at most 1.0)",
+        help="Fixed mode only: forward command in m/s (positive, at most 1.0)",
     )
     parser.add_argument(
-        "--wz", type=float, choices=(0.0,), default=0.0,
-        help="Yaw-rate command must remain zero for this walking test",
+        "--wz", type=float, default=0.0,
+        help="Fixed mode only: yaw-rate command in rad/s, within [-0.5, 0.5]",
     )
     parser.add_argument("--kp-scale", type=float, default=1.0)
     parser.add_argument("--kd-scale", type=float, default=1.0)
@@ -129,8 +135,19 @@ def main() -> int:
         raise SystemExit("plot-every must be at least 1")
     if args.plot_history_seconds <= 0.0:
         raise SystemExit("plot-history-seconds must be positive")
-    if args.policy == "walking" and (not np.isfinite(args.vx) or not 0.0 < args.vx <= 1.0):
-        raise SystemExit("vx must be finite and in (0, 1] for constant forward walking")
+    if args.policy == "walking":
+        if args.command_source == "vision":
+            if not 1 <= args.udp_command_port <= 65535:
+                raise SystemExit("udp-command-port must be between 1 and 65535")
+            if not np.isfinite(args.command_timeout) or args.command_timeout <= 0:
+                raise SystemExit("command-timeout must be finite and positive")
+        else:
+            if not np.isfinite(args.vx) or not 0.0 < args.vx <= 1.0:
+                raise SystemExit("vx must be finite and in (0, 1] for constant forward walking")
+            if not np.isfinite(args.wz) or not -0.5 <= args.wz <= 0.5:
+                raise SystemExit("wz must be finite and in [-0.5, 0.5]")
+            if not np.isfinite(args.walk_seconds) or args.walk_seconds < 0:
+                raise SystemExit("walk-seconds must be finite and nonnegative")
 
     stop_requested = False
 
@@ -154,12 +171,22 @@ def main() -> int:
         )
     else:
         policy = HumanoidPolicy(args.model)
-        command_source = FixedCommandSource(args.vx, 0.4)
-        command_source_description = (
-            f"fixed walking vx={args.vx:+.3f} m/s, vy=0, wz=0; "
-            f"step_distance={config.DEFAULT_STEP_DISTANCE:.3f} m, crossing=0; "
-            "vision disconnected"
-        )
+        if args.command_source == "vision":
+            command_source = UdpCommandSource(
+                args.udp_command_port, timeout_s=args.command_timeout,
+                bind=args.udp_command_bind,
+            )
+            command_source_description = (
+                f"new_vision/connector on udp://{args.udp_command_bind}:"
+                f"{args.udp_command_port}; timeout={args.command_timeout:.3f}s; "
+                "live vx/wz, vy=0; fixed-command timer disabled"
+            )
+        else:
+            command_source = FixedCommandSource(args.vx, args.wz)
+            command_source_description = (
+                f"fixed walking vx={args.vx:+.3f} m/s, vy=0, wz={args.wz:+.3f}; "
+                f"walk_seconds={args.walk_seconds:g} (0=continuous); vision disconnected"
+            )
     position_logger = PositionCsvLogger(args.position_log_dir, config.JOINT_NAMES)
     position_plot = None
     if not args.no_plot:
@@ -247,10 +274,9 @@ def main() -> int:
                 command_status = f"lift_command={int(lift_command)} support={args.support_foot} "
             else:
                 velocity_command = command_source.get()
-
-
-                # Walk for 3 seconds, then command zero velocity until Ctrl+C.
-                if now - start_time >= 5.0:
+                # A fixed-test timer must never override live vision commands.
+                if (args.command_source == "fixed" and args.walk_seconds > 0
+                        and now - start_time >= args.walk_seconds):
                     velocity_command[:] = 0.0  # vx=0, vy=0, wz=0
 
                 command_values = {"velocity_command": velocity_command}
@@ -344,5 +370,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 

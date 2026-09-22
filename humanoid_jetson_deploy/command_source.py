@@ -58,8 +58,10 @@ class UdpCommandSource:
                 continue
             try:
                 message = json.loads(data.decode("utf-8"))
+                if not isinstance(message, dict):
+                    raise ValueError("command must be a JSON object")
                 command = clamp_command([message["vx"], message.get("vy", 0.0), message["wz"]])
-            except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError, OverflowError):
                 continue
             with self.lock:
                 self.command = command

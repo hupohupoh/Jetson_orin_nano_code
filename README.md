@@ -3,15 +3,19 @@
 The runtime supports standard forward walking from `Humanoid_Robot_RSL_RL`
 and one-foot standing from `Humanoid_Robot_One_Foot_Standing`. Select the
 interface with `--policy walking` (default) or `--policy one-foot`.
-Vision is disconnected in both modes.
+Walking can receive live `new_vision` commands with `--command-source vision`.
+See the [closed-loop setup and testing guide](docs/closed_loop_vision.md).
+Fixed-command walking remains the default; one-foot mode does not use vision.
 
 Walking defaults:
 
 - 49 observations, including step distance and crossing command.
-- Constant forward velocity: **0.4 m/s** by default; lateral velocity and yaw rate: **0**.
-- Constant default step distance: **0.08 m**; crossing command: **0**.
+- Fixed mode: **0.4 m/s** forward by default; lateral velocity and yaw rate: **0**.
+- Vision mode: live forward/yaw commands over the original UDP JSON protocol.
+- Step distance: **0.08 m** while moving, **0** for an all-zero velocity command; crossing: **0**.
 - 50 Hz inference, 12 joint-position actions, action scale 0.25.
-- No automatic stop, turn, bar-crossing command, or UDP vision listener.
+- Fixed mode commands zero after 5 seconds (`--walk-seconds 0` makes it continuous).
+- Vision mode runs continuously with upstream-command watchdogs; no bar-crossing commands.
 - Existing motor enable, state watchdog, joint limits, and emergency shutdown remain active.
 
 These values match training commit `4eb3d5b4d72a792c610ad46f0a8c65b931ed3b22`.
@@ -38,8 +42,9 @@ Add `--no-plot` for headless operation; CSV position and IMU logging stays enabl
 `--max-seconds` ends a timed run and disables motors as before.
 
 `--vx` selects a constant positive speed (at most 1 m/s), defaulting to 0.4.
-`--command-source` accepts only `fixed`, and `--wz` accepts only 0.
-The step distance remains the configured default for the entire run.
+`--command-source fixed` uses `--vx` and `--wz` (yaw range ±0.5 rad/s).
+`--command-source vision` receives both values from the connector instead.
+`--walk-seconds` applies only to fixed mode; its default is 5 seconds.
 
 ## Run one-foot standing
 
@@ -78,10 +83,16 @@ output for the requested run; omitting it keeps the existing dry-run behavior.
 
 ## Vision code
 
-`vision/`, `connector.py`, and the reusable UDP command source remain in the
-repository, but `main.py` does not instantiate a UDP receiver or consume their
-output. Starting a camera/connector process cannot change this walking command.
-No camera process is needed to run the policy.
+Use `new_vision/jetson/run_policy_vision.py` for the walking-policy integration.
+It uses the new line detector, PID steering and one-step preview, then sends
+`{vx, vy: 0, wz, qr: -1}` to `connector.py` on port 5006. The connector forwards
+commands to the policy on port 5005. Only the policy opens the STM32 serial port.
+The V2 CPU/GPU `run_robot.py` scripts are separate serial-controller entry points.
+
+See [the detailed guide](docs/closed_loop_vision.md) for camera setup, exact
+three-terminal commands, dry runs, physical tests, yaw-sign tuning and watchdogs.
+`old_vision/` is retained as reference. Shape actions and bar crossing are outside
+this line-following integration.
 
 ## Tests
 
@@ -90,4 +101,5 @@ python -m unittest discover -s tests -v
 cd humanoid_jetson_deploy
 python -m unittest discover -s tests -v
 ```
+
 
