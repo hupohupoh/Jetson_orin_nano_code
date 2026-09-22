@@ -1,0 +1,15 @@
+{
+  "active": "usb_main",
+  "_说明": "相机参数表。active 指定当前使用的配置，也可用环境变量 CAMERA_PROFILE 覆盖。新增摄像头时在 cameras 里加一段即可。",
+  "cameras": {
+    "usb_main": {
+      "label": "USB相机（实车 1280×720，手工标定 2026-07-17）",
+      "index": 0,
+      "width": 1280,
+      "height": 720,
+      "vfov_deg": 56.2,
+      "mount_height_cm": 40.0,
+      "pitch_deg": 45.0
+    }
+  }
+}
