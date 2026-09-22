@@ -129,7 +129,7 @@ def main() -> int:
                     latest = process_vision_output(decoded)
                     last_vision_update = time.monotonic()
                     vision_update += 1
-                except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError, OverflowError) as exc:
                     print(f"[connector] ignored invalid vision message: {exc}")
 
             now = time.monotonic()

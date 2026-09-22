@@ -46,7 +46,7 @@ The policy period is `0.005 s * decimation 4 = 0.020 s`, or 50 Hz.
 | 3:6 | 3 | IMU angular velocity in policy frame, rad/s |
 | 6:9 | 3 | Projected gravity: world-down unit vector in body/IMU frame |
 | 9:11 | 2 | Command `[vx, wz]` |
-| 11:12 | 1 | Constant default step distance: 0.08 m |
+| 11:12 | 1 | Default step distance: 0.08 m; 0 for all-zero velocity |
 | 12:13 | 1 | Crossing command: 0 (normal walking) |
 | 13:25 | 12 | Joint position minus Isaac default position, radians |
 | 25:37 | 12 | Joint velocity, rad/s |
@@ -418,28 +418,33 @@ Required checks:
 
 The current simulation multiplies acceleration by `0.1` before it reaches the network. `policy_runner.py` applies that same scaling exactly once.
 
-## Step 9: constant forward walking (vision disconnected)
+## Step 9: walking with vision or fixed commands
 
-Run from this directory with a freshly exported, compatible model:
+For closed-loop walking, follow the [new_vision integration guide](../docs/closed_loop_vision.md).
+Run this receiver from the deployment directory:
 
 ```bash
-python main.py --model models/current_walking.onnx --port /dev/ttyACM0
+python main.py --model models/current_walking.onnx --port /dev/ttyACM0 \
+  --command-source vision --no-plot
 ```
 
-The default command is constant `[vx, vy, wz] = [0.4, 0, 0]` in m/s and
-rad/s. Step distance stays at `DEFAULT_STEP_DISTANCE = 0.08` m and crossing
-command stays at zero on every inference. There is no stop, turn, or bar sequence.
+It receives live forward/yaw commands from `connector.py` on UDP port 5005.
+Missing connector data for 0.25 seconds commands zero velocity. The connector
+also has a 0.25-second vision watchdog. There is no timed walking cutoff in vision
+mode. Step distance is the configured default while moving and zero for an
+all-zero velocity command; crossing remains zero.
 
-No camera, connector, UDP listener, or upstream-command timeout participates in
-this runtime. The vision and connector files remain available for future work.
-`--command-source` accepts only `fixed`; `--wz` accepts only zero.
-`--vx` can select another constant positive speed up to 1 m/s; 0.4 m/s
-matches the current training command. Zero, negative, and non-finite speeds
-are rejected. Old UDP options are no longer accepted.
+Standalone fixed tests remain available:
 
-Motor enable remains opt-in. Ctrl+C, timed-run completion, invalid/stale STM32
-state, and fault handling still disable the motors; these protections are
-independent of the policy's constant walking command.
+```bash
+python main.py --model models/current_walking.onnx --port /dev/ttyACM0 \
+  --command-source fixed --vx 0.4 --wz 0 --walk-seconds 5
+```
+
+Fixed mode commands zero after five seconds by default; `--walk-seconds 0`
+keeps it continuous. `--wz` accepts values within ±0.5 rad/s. Motor enable remains
+opt-in. Ctrl+C, `--max-seconds` completion, invalid/stale STM32 state and faults
+still disable motors. A zero velocity command itself does not disable motors.
 
 ## Live motor-position/IMU monitor and CSV log
 
@@ -578,5 +583,6 @@ Confirm the Python and aarch64 environment. Do not install an x86 wheel. As an a
 ## Before real walking
 
 Resolve the mass discrepancy in the provided robot files. The supplied URDF totals approximately 4.19 kg, while the supplied CSV totals approximately 1.16 kg. Confirm which values match the built robot and the USD used for training. Also add sim-to-real randomization for actuator strength, gains, delay, joint zero error, sensor bias, mass/COM, and battery effects before expecting robust unsupported walking.
+
 
 
