@@ -71,7 +71,11 @@ class HumanoidPolicy:
                 np.asarray(projected_gravity, dtype=np.float32),
                 policy_velocity_command,
                 np.array(
-                    [config.DEFAULT_STEP_DISTANCE, config.CROSSING_COMMAND],
+                    [
+                        0.0 if np.all(velocity_command == 0.0)
+                        else config.DEFAULT_STEP_DISTANCE,
+                        config.CROSSING_COMMAND,
+                    ],
                     dtype=np.float32,
                 ),
                 q_rel,

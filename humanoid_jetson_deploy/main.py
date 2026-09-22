@@ -154,7 +154,7 @@ def main() -> int:
         )
     else:
         policy = HumanoidPolicy(args.model)
-        command_source = FixedCommandSource(args.vx, 0.0)
+        command_source = FixedCommandSource(args.vx, 0.4)
         command_source_description = (
             f"fixed walking vx={args.vx:+.3f} m/s, vy=0, wz=0; "
             f"step_distance={config.DEFAULT_STEP_DISTANCE:.3f} m, crossing=0; "
@@ -247,6 +247,12 @@ def main() -> int:
                 command_status = f"lift_command={int(lift_command)} support={args.support_foot} "
             else:
                 velocity_command = command_source.get()
+
+
+                # Walk for 3 seconds, then command zero velocity until Ctrl+C.
+                if now - start_time >= 5.0:
+                    velocity_command[:] = 0.0  # vx=0, vy=0, wz=0
+
                 command_values = {"velocity_command": velocity_command}
                 command_status = (
                     f"policy_target_velocity=[vx={velocity_command[0]:+.3f} m/s, "

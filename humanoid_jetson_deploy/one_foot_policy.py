@@ -32,7 +32,7 @@ class OneFootCommand:
     def get(self, elapsed_s: float) -> float:
         if not math.isfinite(elapsed_s) or elapsed_s < 0:
             raise ValueError("elapsed_s must be finite and nonnegative")
-        return float(self.stand_seconds <= elapsed_s < self.stand_seconds + self.lift_seconds)
+        return float(self.stand_seconds <= elapsed_s)
 
 
 class OneFootPolicy(HumanoidPolicy):
