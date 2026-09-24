@@ -62,7 +62,18 @@ class SerialLink:
         kp_scale: float,
         kd_scale: float,
         command_flags: int,
-    ) -> None:
+        lock_timeout_s: float | None = None,
+    ) -> bool:
+        """Write one command frame. Returns False if nothing was written.
+
+        ``lock_timeout_s`` bounds how long this waits for the write lock. The
+        emergency path passes a timeout because an unbounded wait is the one way
+        a stop request can be starved: if a control thread wedges while holding
+        the lock, an e-stop that blocks behind it never gets sent. A racy or
+        partial frame is survivable (the STM32 rejects it on CRC), a starvation
+        deadlock is not. Callers that pass nothing keep the old blocking
+        behaviour.
+        """
         packet = CommandPacket(
             sequence=self._sequence,
             timestamp_us=timestamp_us,
@@ -72,9 +83,30 @@ class SerialLink:
             command_flags=command_flags,
         )
         frame = pack_command(packet)
-        with self._write_lock:
+        if lock_timeout_s is None:
+            self._write_lock.acquire()
+            acquired = True
+        else:
+            acquired = self._write_lock.acquire(timeout=lock_timeout_s)
+        if not acquired:
+            return False
+        try:
             self.serial.write(frame)
+        finally:
+            self._write_lock.release()
         self._sequence = (self._sequence + 1) & 0xFFFF
+        return True
+
+    def reader_alive(self) -> bool:
+        """True while the background reader thread is still running.
+
+        Call this after ``close()`` to confirm the port is really released
+        before another process opens the same device. ``close()`` only waits
+        0.2 s for the reader, and a thread still blocked in ``read()`` on a
+        closed descriptor can consume bytes from a later open that reuses the
+        same file descriptor -- silent frame corruption with no error.
+        """
+        return self._thread.is_alive()
 
     def close(self) -> None:
         self._stop.set()
