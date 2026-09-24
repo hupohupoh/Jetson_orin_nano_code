@@ -22,7 +22,7 @@ class SteeringController:
     blind search. Reset PID on loss so reacquisition has no derivative kick.
     """
 
-    def __init__(self, vx=0.4, max_wz=0.5, steer_full_scale_cm=50.0,
+    def __init__(self, vx=0.4, max_wz=0.5, steer_full_scale_cm=10.0,
                  yaw_sign=-1, step_len_cm=8.0, preview_gain=1.0,
                  straight_gains=(0.83, 0.004, 0.095),
                  curve_gains=(0.83, 0.006, 0.16), integral_limit=60.0):
@@ -51,7 +51,7 @@ class SteeringController:
 
     def command(self, debug, confidence, dt):
         try:
-            err = float(debug["fused_err"])
+            err = float(debug["fused_err_cm"])
             angle = float(debug["angle_err_deg"])
             lost = float(debug["lost_frames"])
             valid = (all(math.isfinite(v) for v in (err, angle, lost, confidence, dt))

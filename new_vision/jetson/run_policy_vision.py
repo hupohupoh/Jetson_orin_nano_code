@@ -36,8 +36,8 @@ def parse_args():
                         help="Forward speed with valid detection, m/s")
     parser.add_argument("--max-wz", type=float, default=0.5,
                         help="Yaw-rate limit, rad/s (0..0.5)")
-    parser.add_argument("--steer-full-scale-cm", type=float, default=50.0,
-                        help="PID steering error producing max-wz; smaller means stronger steering")
+    parser.add_argument("--steer-full-scale-cm", type=float, default=10.0,
+                        help="Cross-track error (cm) producing max-wz; smaller means stronger steering")
     parser.add_argument("--yaw-sign", type=int, choices=(-1, 1), default=-1)
     parser.add_argument("--step-len-cm", type=float, default=float(os.getenv("STEP_LEN_CM", "8")))
     parser.add_argument("--preview-gain", type=float, default=float(os.getenv("PREVIEW_GAIN", "1")))
