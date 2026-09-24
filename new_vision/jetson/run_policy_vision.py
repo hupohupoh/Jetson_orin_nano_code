@@ -68,7 +68,7 @@ def main():
         vx=args.vx, max_wz=args.max_wz, steer_full_scale_cm=args.steer_full_scale_cm,
         yaw_sign=args.yaw_sign, step_len_cm=args.step_len_cm, preview_gain=args.preview_gain,
         straight_gains=gains("STRAIGHT", (0.83, 0.004, 0.095)),
-        curve_gains=gains("CURVE", (0.78, 0.002, 0.16)),
+        curve_gains=gains("CURVE", (0.83, 0.006, 0.16)),
         integral_limit=float(os.getenv("JETSON_PID_I_CLAMP", "60")),
     )
     # Lazy imports keep --help and controller tests usable without a camera stack.
