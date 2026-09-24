@@ -19,7 +19,7 @@ _DEFAULTS = {
     "width": 1280,
     "height": 720,
     "vfov_deg": 55.876,
-    "mount_height_cm": 40.0,
+    "mount_height_cm": 32.5,
     "pitch_deg": 45.0,
     "distance_calib": {"a": 1.0, "b": 0.0},
 }

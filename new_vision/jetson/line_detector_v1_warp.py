@@ -6,7 +6,7 @@ Key differences from V0:
   - Band definitions adapted for 400px birdseye (down 266-398, mid 132-264, up 0-130)
   - No PID/steer/lost controller code — pure vision pipeline
   - No JSON config loading — all params are hardcoded defaults
-  - Constructor: V1(cam_w=1280, cam_h=720, cam_height_cm=40, cam_vfov_deg=56.2)
+  - Constructor: V1(cam_w=1280, cam_h=720, cam_height_cm=32.5, cam_vfov_deg=55.876)
 """
 
 import cv2
@@ -69,7 +69,7 @@ def line_fit(ys, xs):
 # ═══════════════════════════════════════════════════════════════════════
 
 class LineDetector:
-    def __init__(self, cam_w=1280, cam_h=720, cam_height_cm=40.0, cam_pitch_deg=45.0, cam_vfov_deg=56.2,
+    def __init__(self, cam_w=1280, cam_h=720, cam_height_cm=32.5, cam_pitch_deg=45.0, cam_vfov_deg=55.876,
                  z_calib=None):
         # ── Camera params ──
         self.cam_w = int(cam_w)
