@@ -51,6 +51,12 @@ def parse_args():
     parser.add_argument("--deriv-pole", type=float,
                         default=float(os.getenv("JETSON_PID_D_FILTER", "0.78")),
                         help="IIR pole on the D term; higher is smoother, 0 disables the filter")
+    parser.add_argument("--bias-cm", type=float,
+                        default=float(os.getenv("STEER_BIAS_CM", "0")),
+                        help="Standing trim added to fused_err_cm, shifting where the loop "
+                             "settles to cancel a one-sided lateral offset. Only correct if "
+                             "the offset is present on straights too; a curve-only offset is "
+                             "curvature and belongs to the curve terms")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--max-seconds", type=float, default=0.0,
                         help="0 runs until Ctrl+C")
@@ -81,6 +87,7 @@ def main():
         curve_gains=gains("CURVE", (0.83, 0.006, 0.16)),
         integral_limit=float(os.getenv("JETSON_PID_I_CLAMP", "60")),
         lost_hold_s=args.lost_hold_s, deriv_pole=args.deriv_pole,
+        bias_cm=args.bias_cm,
     )
     # Lazy imports keep --help and controller tests usable without a camera stack.
     import cv2

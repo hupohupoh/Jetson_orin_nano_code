@@ -59,6 +59,15 @@ class SteeringTests(unittest.TestCase):
         controller = SteeringController()
         self.assertEqual(controller.command(detection(0.0, 22.0), 0.8, 0.02)[1], 0.0)
 
+    def test_bias_moves_the_zero_point_the_loop_settles_on(self):
+        plain = SteeringController(straight_gains=(1, 0, 0), steer_full_scale_cm=50)
+        trimmed = SteeringController(straight_gains=(1, 0, 0), steer_full_scale_cm=50,
+                                     bias_cm=5.0)
+        self.assertEqual(plain.command(detection(0.0), 0.8, 0.02)[1], 0.0)
+        self.assertGreater(trimmed.command(detection(0.0), 0.8, 0.02)[1], 0.0)
+        # A centred reading must stop being centred once the trim is applied.
+        self.assertEqual(trimmed.command(detection(-5.0), 0.8, 0.02)[1], 0.0)
+
     def test_invalid_or_lost_detection_stops_and_resets(self):
         controller = SteeringController(lost_hold_s=0.0)
         controller.command(detection(), 0.8, 0.02)
@@ -106,7 +115,7 @@ class SteeringTests(unittest.TestCase):
         for kwargs in (dict(max_wz=1.5), dict(vx=float("nan")), dict(yaw_sign=0),
                        dict(steer_full_scale_cm=0), dict(step_len_cm=-1),
                        dict(lost_hold_s=-1.0), dict(deriv_pole=1.0),
-                       dict(deriv_pole=-0.1)):
+                       dict(deriv_pole=-0.1), dict(bias_cm=float("nan"))):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 SteeringController(**kwargs)
 

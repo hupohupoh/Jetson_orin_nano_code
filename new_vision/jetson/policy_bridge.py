@@ -31,9 +31,9 @@ class SteeringController:
                  yaw_sign=1, step_len_cm=8.0, preview_gain=1.0,
                  straight_gains=(0.83, 0.004, 0.095),
                  curve_gains=(0.83, 0.006, 0.16), integral_limit=60.0,
-                 lost_hold_s=0.2, deriv_pole=0.78):
+                 lost_hold_s=0.2, deriv_pole=0.78, bias_cm=0.0):
         values = (vx, max_wz, steer_full_scale_cm, yaw_sign, step_len_cm,
-                  preview_gain, integral_limit, lost_hold_s, deriv_pole,
+                  preview_gain, integral_limit, lost_hold_s, deriv_pole, bias_cm,
                   *straight_gains, *curve_gains)
         if not all(math.isfinite(v) for v in values):
             raise ValueError("controller settings must be finite")
@@ -53,6 +53,11 @@ class SteeringController:
         self.step_len, self.preview_gain = step_len_cm, preview_gain
         self.straight_gains, self.curve_gains = straight_gains, curve_gains
         self.integral_limit = integral_limit
+        # Additive trim on fused_err_cm. The loop settles where the P term
+        # balances the disturbance, so a standing lateral offset is removed by
+        # shifting where that balance reads zero, not by offsetting wz - a
+        # constant wz would only bend a straight into a very large circle.
+        self.bias_cm = bias_cm
         self.reset()
         self.lost_hold_s = lost_hold_s
         # Patience deliberately lives outside reset(): command() calls reset() on
@@ -111,6 +116,7 @@ class SteeringController:
             self.hold = (0.0, 0.0)
             return self.hold
         dt = clamp(dt, 0.01, 0.2)
+        err += self.bias_cm
         curve = bool(debug.get("curve_mode", False))
         # Clear only on the curve -> straight transition. The previous condition
         # (bottom lock valid AND previous frame was a curve) fired on every frame

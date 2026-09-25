@@ -219,12 +219,17 @@ velocity. With the defaults, 10 cm of final PID steering gives -0.1 rad/s.
 - `--vx`: sets forward speed in the vision process; choose a speed your policy
   can track reliably (repository default 0.4 m/s).
 - `--step-len-cm`: default 8; keep consistent with your intended walking stride.
-- `--preview-gain`: default 0. The heading term it scales is already measured,
-  twice over, inside `fused_err_cm`: the detector adds `pix_angle_gain * angle/45`
-  (0.0797 cm per degree in physical units) and `lookahead_dyn * far_err`, which on
-  a curve grows to 2.3x. The preview is 0.558 cm per degree, 7x the detector's
-  own term, so it does not add a correction - it replaces one, with a much larger
-  and uncalibrated gain.
+- `--preview-gain`: default 0. On a curve the measured `ang` is about +22 deg and
+  hardly moves, so the term is a curvature feedforward of `preview_gain * 8 *
+  sin(22 deg) = 2.98 * preview_gain` cm. At `steer_full_scale_cm = 10` that
+  reaches full scale at `preview_gain` 3.4, and the command saturates from the
+  heading term before the lateral error contributes anything. Off, the curve
+  command comes from the P term alone, which costs a standing offset - measured
+  at roughly 5 cm of `err` in the curve - but leaves the P term in control.
+- `--bias-cm`: default 0. Adds a constant to `fused_err_cm`, moving where the loop
+  settles. Only correct when the standing offset is the same on straights and
+  curves; an offset that appears only in curves is curvature and belongs to the
+  curve terms, and a constant trim would push the straights off-centre.
 - `--lost-hold-s`: default 0.2; how long to hold the last command before
   stopping on line loss.
 - `--deriv-pole`: default 0.78; raise for a smoother D term, lower for faster.
@@ -242,12 +247,18 @@ samples at 2 Hz):
 | centred, `abs(err) < 2 cm`, mean `ang` ~17 deg | `steer +10.16 cm`, `wz +0.473` | `steer +0.01 cm`, `wz +0.000` |
 
 At the old default the controller held `wz = +0.5` and `err = +7.6 cm` frozen for
-25 s: saturated, unable to recover, so the robot circled at the yaw cap. The
-angle being scaled is also biased - it stayed positive in 107 of 110 samples over
-roughly three laps, mean +21.9 deg, where a real heading error would cross zero.
-At `preview_gain 4` that bias alone produced `4 * 8 * sin(20 deg) = 10.9 cm` of
-steer, more than `steer_full_scale_cm`. The bias is a detector-side problem and is
-not fixed here.
+25 s: saturated, unable to recover, so the robot circled at the yaw cap. At
+`preview_gain 4` the heading term alone is `4 * 8 * sin(22 deg) = 12 cm`, more
+than `steer_full_scale_cm`, so saturation is structural rather than a tuning
+miss.
+
+`ang` is a curvature signal, not a heading error: measured statically it is
+-0.55 deg on a straight and +21.9 deg on a curve. It is therefore not a bias to
+be subtracted, and `--bias-cm` is not a substitute for it.
+
+**Not yet measured:** every run so far covered the curve section only. Whether
+the standing offset is also present on a straight is still open, and that is what
+decides whether a constant `--bias-cm` is the right fix.
 
 The 0.5 rad/s cap is retained from the old communication implementation. Raising
 it would require coordinated edits to the mapper, connector, and policy receiver
