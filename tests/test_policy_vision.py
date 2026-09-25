@@ -279,11 +279,15 @@ class VisionEntryPointTests(unittest.TestCase):
         self.assertEqual(published[0].args[2], -1)
         self.assertEqual(published[1].args[:2], (0.0, 0.0))
         self.assertEqual(published[1].args[2], 3)
-        # read 51 (t=5.1) is the last frame inside the window; read 52 (t=5.2) drives again
-        self.assertEqual(published[50].args[:2], (0.0, 0.0))
-        self.assertEqual(published[50].args[2], 3)
-        self.assertGreater(published[51].args[0], 0.0)
-        self.assertEqual(published[51].args[2], -1)
+        # The window is 5000 ms at 10 Hz, so it lifts around publish 52 (read 53).
+        # Asserted as a window rather than an exact index: the mocked clock
+        # accumulates 0.1 fifty-odd times and lands either side of the boundary.
+        resumed = next(i for i, call in enumerate(published)
+                       if i > 1 and call.args[0] > 0.0)
+        self.assertIn(resumed, (51, 52, 53))
+        self.assertEqual(published[resumed - 1].args[:2], (0.0, 0.0))
+        self.assertEqual(published[resumed - 1].args[2], 3)   # still holding
+        self.assertEqual(published[resumed].args[2], -1)      # released with the resume
 
     def test_real_new_detector_reports_blank_frame_as_lost(self):
         from line_detector_v1_warp import LineDetector
