@@ -31,11 +31,17 @@ The communication is the earlier working UDP JSON path (see historical commit
 schema; it does not represent a geometric-shape detection. Both UDP stages
 retain the existing `vx=0..1` and `wz=-0.5..0.5` clamps.
 
-This entry point is for line-following walking. It does not execute shape-card
-actions, stop for cards, or trigger bar crossing. Use a track section without
-those tasks for the integration test. The original CPU/GPU `run_robot.py`
+This entry point is for line-following walking. It reports a detected shape card
+in the connector's `qr` field but does **not** stop for it or perform any card
+action - that is the receiver's decision and nothing downstream reads `qr`
+today. Bar crossing is not signalled either. The original CPU/GPU `run_robot.py`
 entry points still produce V2 serial messages and are not the policy bridge.
 Only the policy process should open the STM32 serial device.
+
+Card detection costs real time. Timed on the Orin at 1280x720, `ShapeDetector`
+takes 31 ms with no card in view and 95-122 ms with one, against 29 ms for
+`LineDetector` alone. `--shape-every` sets how often it runs; `--no-shape-detect`
+removes the cost entirely and leaves `qr` at -1.
 
 ## 1. Check out the draft branch and prepare the environment
 
@@ -234,6 +240,15 @@ velocity. With the defaults, 10 cm of final PID steering gives -0.1 rad/s.
 - `--bias-gate-px`: default 12; the `abs(curve_px)` at which the trim is fully on.
   The real curve reads 9..14, so 12 puts the gate near 1 through the curve and at
   0 by curve_px 0.
+- `--no-shape-detect`: card detection is on by default; this turns it off and
+  leaves `qr` at -1.
+- `--shape-every`: default 6. How many frames apart to run `ShapeDetector`. It is
+  an order of magnitude more expensive than the line detector (see above), so
+  this is the main knob for protecting the vision loop rate.
+- `--card-hold-ms`: default 3000. How long `qr` keeps reporting a detected card.
+  3000 matches the rules' action window and stays under `ShapeDetector`'s
+  `cooldown_ms` of 3200, so one card cannot re-fire. The value is held across a
+  dropped camera frame so a lost UDP packet cannot lose the event.
 - `--lost-hold-s`: default 0.2; how long to hold the last command before
   stopping on line loss.
 - `--deriv-pole`: default 0.78; raise for a smoother D term, lower for faster.
