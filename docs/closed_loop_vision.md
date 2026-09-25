@@ -51,11 +51,24 @@ with no hole. It cannot say which shape it is, and it is not asked to. Presence
 is accumulated over time (3 hits in the last 9 calls, at least one in the last 3)
 because the shake is periodic.
 
-`presence` stands the robot still for `--card-stop-ms`, during which detection
-runs **every frame** instead of every `--shape-every`. Standing still the camera
-is steady, the quad path works, and the shape comes out of the tuned classifier -
-the one that is not to be touched. When the shape is known, `qr` is published and
-the robot holds for `--card-hold-ms` (the rules' action window) before resuming.
+Seeing a card does **not** stop the robot. It keeps a per-card flag, drops the
+speed to `--card-slow-vx`, and rolls on until the box centroid reaches
+`--card-trigger-frac` - 0.75, the lower quarter of the frame - which is when the
+card is actually close. Only then does it stop, and detection then runs **every
+frame** instead of every `--shape-every`. Standing still the camera is steady,
+the quad path works, and the shape comes out of the tuned classifier - the one
+that is not to be touched. When the shape is known, `qr` is published and the
+robot holds for `--card-hold-ms` (the rules' action window) before resuming.
+
+The flag clears only after `--card-clear-calls` (4) consecutive detection calls
+with no card, and that counter is also what makes the trigger once-per-card. One
+absent call used to be enough, and since the cue flickers while walking the stop
+re-armed: the robot crept forward, stopped again, and eventually parked itself
+with the stop window pushed out on every re-trigger.
+
+The detector reports the box centroid as `dbg["presence_cy_frac"]` (0 = top of
+frame, 1 = bottom) from both the quad and the cue branch. `--card-trigger-frac`
+is the only thing that decides when to stop; `presence` alone just slows it.
 
 Measured on four real-robot clips: 7/157 card frames held presence before the
 blur-tolerant cue, 142/157 after, with 0 false positives on 369 card-free frames.
