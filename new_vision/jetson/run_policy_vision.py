@@ -71,8 +71,11 @@ def parse_args():
                              "rules' action window; acting on it is the receiver's business. "
                              "Keep it under ShapeDetector cooldown_ms so cards cannot re-fire")
     parser.add_argument("--shape-every", type=int,
-                        default=max(1, int(os.getenv("SHAPE_EVERY", "3"))),
-                        help="Run card detection every N frames; raise it if the vision loop slows")
+                        default=max(1, int(os.getenv("SHAPE_EVERY", "6"))),
+                        help="Run card detection every N frames. Measured at 1280x720: "
+                             "31 ms with no card in view, 95-122 ms with one, against "
+                             "29 ms for the line detector alone. 6 keeps the loop near "
+                             "29 Hz clear and 23 Hz while a card is visible")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--max-seconds", type=float, default=0.0,
                         help="0 runs until Ctrl+C")
