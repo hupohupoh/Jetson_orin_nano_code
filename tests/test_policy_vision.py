@@ -33,9 +33,9 @@ def detection(error=10.0, angle=0.0, lost=0, curve=False):
 
 class SteeringTests(unittest.TestCase):
     def test_sign_units_clamping_and_preview(self):
-        # yaw_sign pinned so this tests the maths, not the default's polarity.
+        # yaw_sign and preview_gain pinned so this tests the maths, not the defaults.
         controller = SteeringController(straight_gains=(1, 0, 0), steer_full_scale_cm=50,
-                                        yaw_sign=-1)
+                                        yaw_sign=-1, preview_gain=4)
         np.testing.assert_allclose(controller.command(detection(), 0.8, 0.02), [0.4, -0.1])
         self.assertGreater(controller.command(detection(-10), 0.8, 0.02)[1], 0)
         self.assertEqual(controller.command(detection(1000), 0.8, 0.02)[1], -0.5)
@@ -48,6 +48,16 @@ class SteeringTests(unittest.TestCase):
         """-1 turned the robot the wrong way, so the default is 1."""
         controller = SteeringController(straight_gains=(1, 0, 0), steer_full_scale_cm=50)
         self.assertGreater(controller.command(detection(), 0.8, 0.02)[1], 0)
+
+    def test_default_preview_is_off(self):
+        """A centred robot must not be steered by the heading angle alone.
+
+        The measured angle carries a one-sided bias of about 20 deg. At the old
+        default preview_gain 4 that became 4*8*sin(20 deg) = 10.9 cm of steer -
+        full scale on its own, with the lateral error at zero.
+        """
+        controller = SteeringController()
+        self.assertEqual(controller.command(detection(0.0, 22.0), 0.8, 0.02)[1], 0.0)
 
     def test_invalid_or_lost_detection_stops_and_resets(self):
         controller = SteeringController(lost_hold_s=0.0)

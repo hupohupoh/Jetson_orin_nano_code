@@ -42,8 +42,10 @@ def parse_args():
                         help="Image steering to policy yaw; flip it if the robot turns the wrong way")
     parser.add_argument("--step-len-cm", type=float, default=float(os.getenv("STEP_LEN_CM", "8")))
     parser.add_argument("--preview-gain", type=float,
-                        default=float(os.getenv("PREVIEW_GAIN", "4")),
-                        help="Heading feedforward: steps of predicted drift to steer out")
+                        default=float(os.getenv("PREVIEW_GAIN", "0")),
+                        help="Heading feedforward: steps of predicted drift to steer out. "
+                             "0 (default) leaves heading feedback to the detector's angle term, "
+                             "which is 7x weaker but carries far less of the angle bias")
     parser.add_argument("--lost-hold-s", type=float, default=0.2,
                         help="Hold the last command this long after line loss before stopping")
     parser.add_argument("--deriv-pole", type=float,

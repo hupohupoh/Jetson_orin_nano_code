@@ -8,9 +8,10 @@ need to forward the camera or the UDP ports.
 ## What runs, and why this is closed loop
 
 1. The robot-mounted USB camera observes its current position relative to the track.
-2. `new_vision/jetson/run_policy_vision.py` uses the new CPU `LineDetector`,
-   the dual straight/curve PID and one-step preview from `run_robot.py`, and
-   converts steering error to a yaw-rate command in rad/s.
+2. `new_vision/jetson/run_policy_vision.py` uses the new CPU `LineDetector` and
+   the dual straight/curve PID from `run_robot.py`, and converts steering error
+   to a yaw-rate command in rad/s. `run_robot.py`'s preview term is off by
+   default here; section 5 has the measurement that turned it off.
 3. `connector.py` holds and forwards the latest command at 50 Hz.
 4. `humanoid_jetson_deploy/main.py --command-source vision` puts the live
    forward/yaw commands into the 49-input walking policy along with STM32
@@ -218,13 +219,35 @@ velocity. With the defaults, 10 cm of final PID steering gives -0.1 rad/s.
 - `--vx`: sets forward speed in the vision process; choose a speed your policy
   can track reliably (repository default 0.4 m/s).
 - `--step-len-cm`: default 8; keep consistent with your intended walking stride.
-- `--preview-gain`: default 1; reduce if anticipatory steering causes oscillation.
+- `--preview-gain`: default 0. The heading term it scales is already measured,
+  twice over, inside `fused_err_cm`: the detector adds `pix_angle_gain * angle/45`
+  (0.0797 cm per degree in physical units) and `lookahead_dyn * far_err`, which on
+  a curve grows to 2.3x. The preview is 0.558 cm per degree, 7x the detector's
+  own term, so it does not add a correction - it replaces one, with a much larger
+  and uncalibrated gain.
 - `--lost-hold-s`: default 0.2; how long to hold the last command before
   stopping on line loss.
 - `--deriv-pole`: default 0.78; raise for a smoother D term, lower for faster.
 - Existing `JETSON_PID_STRAIGHT_KP/KI/KD`, `JETSON_PID_CURVE_KP/KI/KD`,
   `JETSON_PID_I_CLAMP`, `JETSON_PID_D_FILTER`, `STEP_LEN_CM`, and `PREVIEW_GAIN`
   environment overrides work.
+
+Measured on the real track with only `--preview-gain` changed (110 and 53 log
+samples at 2 Hz):
+
+| | `--preview-gain 4` | `--preview-gain 0` |
+|---|---|---|
+| `steer` at full scale (>= 10 cm) | 71% of samples | 13% |
+| `wz` pinned at the 0.5 cap | 74% | 15% |
+| centred, `abs(err) < 2 cm`, mean `ang` ~17 deg | `steer +10.16 cm`, `wz +0.473` | `steer +0.01 cm`, `wz +0.000` |
+
+At the old default the controller held `wz = +0.5` and `err = +7.6 cm` frozen for
+25 s: saturated, unable to recover, so the robot circled at the yaw cap. The
+angle being scaled is also biased - it stayed positive in 107 of 110 samples over
+roughly three laps, mean +21.9 deg, where a real heading error would cross zero.
+At `preview_gain 4` that bias alone produced `4 * 8 * sin(20 deg) = 10.9 cm` of
+steer, more than `steer_full_scale_cm`. The bias is a detector-side problem and is
+not fixed here.
 
 The 0.5 rad/s cap is retained from the old communication implementation. Raising
 it would require coordinated edits to the mapper, connector, and policy receiver
