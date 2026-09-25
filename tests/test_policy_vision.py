@@ -202,7 +202,7 @@ class VisionEntryPointTests(unittest.TestCase):
         detector = Mock()
         detector.process.return_value = (0, 0, 0.8, None, detection())
         shape = Mock()
-        shape.update.side_effect = [(3, {}), (None, {})]  # fires once, like the cooldown
+        shape.update.side_effect = [(3, {})] + [(None, {})] * 2  # fires once, like the cooldown
         shape.action_map = {"square": 3}
         with (
             patch("sys.argv", ["run_policy_vision.py", "--headless",
@@ -226,10 +226,13 @@ class VisionEntryPointTests(unittest.TestCase):
             camera.read.side_effect = read
             self.assertEqual(run_policy_vision.main(), 0)
             published = [c.args[2] for c in client_cls.return_value.publish.call_args_list]
-            # Detected on frame 1, held across frame 2 and the dropped-frame path.
-            self.assertEqual(published[:3], [3, 3, 3])
+            # Detected on frame 1; still asserted on frames 2, 3 and the frame-read failure.
+            self.assertEqual(published, [3, 3, 3, 3])
             # Velocity is untouched: the card is reported, not acted on.
-            self.assertEqual(client_cls.return_value.publish.call_args_list[0].args[0], 0.4)
+            first, dropped = client_cls.return_value.publish.call_args_list[0], \
+                client_cls.return_value.publish.call_args_list[3]
+            self.assertEqual(first.args[0], 0.4)
+            self.assertEqual(dropped.args[:2], (0.0, 0.0))
             self.assertEqual(shape.update.call_args_list[0].kwargs["lane_offset_cm"], 0.0)
 
     def test_real_new_detector_reports_blank_frame_as_lost(self):
