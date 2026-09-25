@@ -19,6 +19,7 @@ import math
 import os
 import cv2
 import time
+from collections import deque
 import numpy as np
 
 from camera_config import load as _load_camera, to_model_z
@@ -105,6 +106,35 @@ class ShapeDetector:
             # 触发只看这一条：找框本身已经把 10cm 地面方形 + max_dist_cm 卡住了，
             # 形状分类和车道位置不再参与"要不要停"。
             "presence_top_frac": 1.0 / 3.0,
+            # 存在信号兜底（_presence_cue）：模糊/稍远时外框被运动模糊打断，
+            # 四边凑不齐 → 整个找框通道为 0。这里改用"闭合环"结构：
+            # 图卡 = 一圈细暗边框围出的亮纸面，纸面上还有暗图形；
+            # 巡线/白色道线被 blackhat 打成实心粗笔画，没有大块亮孔。
+            # 只喂 dbg["presence"]，不参与分类。
+            #
+            # ink 阈值化：必须用大核 RECT blackhat（不是 _binary_selective 的
+            # 细线选择性核9）。运动模糊把 0.5cm 边框糊成 4-8px 粗、低对比的
+            # 条带，核9 + 笔画宽[1.5,7] 直接把它滤掉——1314 全片 0 命中就是
+            # 这个原因。核31 对"比核细的暗结构"一律响应，模糊边框与巡线都在。
+            "cue_bh_kernel": 31,       # blackhat 核（RECT，O(1)，约0.6ms）
+            "cue_ink_thresh": 12,      # 暗于局部最大值多少算墨
+            "cue_close": 9,            # 闭运算核：把糊断的边框连成闭合环
+            # 结构闸门（连通域 = 卡的外轮廓）
+            "cue_side_min": 30,        # 外接矩形短边下限 px
+            "cue_side_max": 340,       # 长边上限（再大不是 10cm 卡）
+            "cue_aspect_max": 2.6,     # 长边/短边上限
+            "cue_fill_min": 0.30,      # 连通域面积 / 外接矩形面积
+            "cue_edge_margin": 4,      # 上/左/右被画面切掉的不算完整卡
+            "cue_inner_min": 0.005,    # 环内亮孔占比下限（必须有纸面）
+            "cue_ring_max": 20.0,      # 环厚（面积/周长）上限，拒实心粗笔画
+            "cue_core_gray_min": 100.0,  # 亮孔灰度下限
+            "cue_contrast_min": 4.0,   # 亮孔 − 环 灰度下限
+            # 时间累积：抖动是步态频率的周期运动，单帧判定必然断续。
+            # 近 N 帧里出现 M 次算"卡在前面"；再看最近 R 帧里至少有一次命中，
+            # 把尾随段压到 R-1 帧，不然卡走了 presence 还挂着就是假阳性。
+            "cue_hist_n": 9,
+            "cue_hist_m": 3,
+            "cue_hist_recent": 3,
         }
 
         # 动作映射: shape_name -> action_number (1-6)
@@ -133,6 +163,9 @@ class ShapeDetector:
         # 触发阶段才查位置。图卡离开或触发后清除。
         self.trusted = None
         self._lsd = None            # LSD 检测器（复用，创建有开销）
+        # 存在信号时间窗（per-frame 命中 0/1）与最近一次 cue 框
+        self._cue_hist = deque(maxlen=self.cfg["cue_hist_n"])
+        self._cue_box = None
 
         # ── 面积下限：按相机几何算（图卡在 max_dist_cm 处的投影像素面积）──
         self.cfg["area_min"] = int(self._card_area_at_dist(
@@ -281,9 +314,12 @@ class ShapeDetector:
         shape = None
         dbg = {"card_found": best is not None, "roi_y0": self._roi_y0,
                "roi_ratio": self.roi_ratio, "scores": scores[:8],
-               "binary": binary, "gray": gray}
+               "binary": binary, "gray": gray,
+               "presence_box": None, "presence_box_work": None,
+               "presence_cue": 0.0}
 
         if best is not None:
+            self._cue_hist.append(1)   # 找框成功 = 强存在证据，时间窗记命中
             warp = self._warp_card(binary, best)
             dbg["warp"] = warp
             shape = self._classify(warp, dbg)
@@ -305,8 +341,25 @@ class ShapeDetector:
             # （兜底拿最大连通域的外接矩形硬判形状，既没有触发权，
             #  产生的分类结果也只会污染统计）
             dbg["fallback"] = True
-            dbg["presence"] = False
             shape = None
+            # 找框全线为 0，才退到"细环 + 亮纸面"的存在信号兜底（省几毫秒，
+            # 也避免两条通道给出不一致的框）。命中进时间窗，累积够了才认。
+            box, cue_score = self._presence_cue(gray)
+            self._cue_hist.append(1 if box is not None else 0)
+            if box is not None:
+                bx, by, bw, bh_ = box
+                qw = np.array([[bx, by], [bx + bw, by], [bx + bw, by + bh_],
+                               [bx, by + bh_]], np.float32)
+                q_orig = qw * np.array([self._scale_x, self._scale_y],
+                                       np.float32)
+                q_orig[:, 1] += self._roi_y0
+                self._cue_box = (qw.astype(np.int32), q_orig.astype(np.int32),
+                                 cue_score)
+            dbg["presence"] = bool(self.armed and self._cue_confirmed())
+            if dbg["presence"] and self._cue_box is not None:
+                # 用最近一次命中框做可视化：累积确认期间框不闪
+                dbg["presence_box_work"], dbg["presence_box"], \
+                    dbg["presence_cue"] = self._cue_box
 
         if shape is None:
             # 这一帧没检出图卡（框没进门槛，或抖动导致漏检）。不清零候选计数
@@ -324,6 +377,86 @@ class ShapeDetector:
 
         dbg["shape"] = shape
         return self._confirm(shape, dbg)
+
+    # ═══════════════════════════════════════════════════════════
+    # 存在信号兜底（不要求闭合四边形）
+    # ═══════════════════════════════════════════════════════════
+
+    def _presence_cue(self, gray):
+        """模糊图卡的"存在"兜底信号：一圈细暗边框围出的亮纸面。
+
+        找框四通道全为 0 时（外框被运动模糊打断成 2-3 段，闭合度上不去），
+        卡在画面里仍然是明确可见的 —— 只是"糊了"。这里不拼四边形，只认
+        结构：blackhat(核31) → 墨 → 闭运算 → 连通域，要求连通域是
+        「细环 + 大块亮孔」：环厚（墨面积/周长）小、亮孔占外接矩形可观、
+        亮孔比环亮。图卡天然满足；巡线/白色道线是实心粗笔画，环厚超标；
+        画面边缘被切掉的连通域不是"完整一张卡"，直接拒。
+
+        返回 ((x, y, w, h), score) 或 (None, 0.0)。判据全部来自 cfg["cue_*"]。
+        """
+        c = self.cfg
+        bh = cv2.morphologyEx(
+            gray, cv2.MORPH_BLACKHAT,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (c["cue_bh_kernel"],) * 2))
+        ink = (bh > c["cue_ink_thresh"]).astype(np.uint8) * 255
+        m = cv2.morphologyEx(
+            ink, cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (c["cue_close"],) * 2))
+        y_lo = WORK_H * c["presence_top_frac"]
+        em = c["cue_edge_margin"]
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+        best, best_score = None, 0.0
+        for cnt in cnts:
+            x, y, w, h = cv2.boundingRect(cnt)
+            smax, smin = max(w, h), min(w, h)
+            if smin < c["cue_side_min"] or smax > c["cue_side_max"]:
+                continue
+            if smax > c["cue_aspect_max"] * smin:
+                continue
+            if y + h < y_lo:            # 只认下半屏（够近）
+                continue
+            # 上/左/右被切掉 → 真实尺寸未知，不给触发权。下边缘不拦：
+            # 卡到了脚前本来就会从画面下沿出去，那正是最该停的时候。
+            if x < em or y < em or x + w > WORK_W - em:
+                continue
+            if cv2.contourArea(cnt) < c["cue_fill_min"] * w * h:
+                continue
+            mo = np.zeros((h, w), np.uint8)
+            cv2.drawContours(mo, [cnt - (x, y)], -1, 1, -1)
+            inner = (mo > 0) & (m[y:y + h, x:x + w] == 0)
+            if not inner.any():
+                continue                 # 实心块：没有亮纸面
+            inner_frac = float(inner.sum()) / float(w * h)
+            if inner_frac < c["cue_inner_min"]:
+                continue
+            na = int((mo > 0).sum())
+            ring = (na - int(inner.sum())) / max(cv2.arcLength(cnt, True), 1.0)
+            if ring > c["cue_ring_max"]:
+                continue                 # 环太厚 = 粗笔画，不是卡边框
+            gs = gray[y:y + h, x:x + w]
+            cg = float(gs[inner].mean())
+            sg = float(gs[(mo > 0) & (~inner)].mean())
+            if cg < c["cue_core_gray_min"] or cg - sg < c["cue_contrast_min"]:
+                continue
+            score = inner_frac * (cg - sg)
+            if score > best_score:
+                best_score, best = score, (int(x), int(y), int(w), int(h))
+        return best, best_score
+
+    def _cue_confirmed(self):
+        """存在信号时间累积：近 N 帧有 M 帧命中，且最近 R 帧内还有命中。
+
+        抖动按步态频率周期性丢帧，单帧判定必然断续；累积到 M 帧才认，中间
+        漏帧不撤销。要求最近 R 帧内仍有命中是为了把尾随段压到 R-1 帧 ——
+        否则卡走出画面后 presence 还会挂几帧，那些帧就是假阳性。
+        """
+        c = self.cfg
+        n = len(self._cue_hist)
+        if sum(self._cue_hist) < c["cue_hist_m"]:
+            return False
+        r = min(c["cue_hist_recent"], n)
+        return any(self._cue_hist[i] for i in range(n - r, n))
 
     # ═══════════════════════════════════════════════════════════
     # S1 线宽选择性二值化
