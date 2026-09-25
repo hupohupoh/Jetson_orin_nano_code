@@ -38,10 +38,38 @@ today. Bar crossing is not signalled either. The original CPU/GPU `run_robot.py`
 entry points still produce V2 serial messages and are not the policy bridge.
 Only the policy process should open the STM32 serial device.
 
+## How a card is handled, and in what order
+
+Detection is split in two because the two halves have very different difficulty.
+
+While the robot **walks**, the gait shake breaks the card's border into two or
+three strokes and no quad closes, so `ShapeDetector`'s find-a-box path returns
+nothing at all. What survives is a much weaker cue: `dbg["presence"]`, set when a
+closed thin dark ring around a bright hole appears in the lower 2/3 - a card is a
+dark border plus white paper, where the lane lines blackhat into solid strokes
+with no hole. It cannot say which shape it is, and it is not asked to. Presence
+is accumulated over time (3 hits in the last 9 calls, at least one in the last 3)
+because the shake is periodic.
+
+`presence` stands the robot still for `--card-stop-ms`, during which detection
+runs **every frame** instead of every `--shape-every`. Standing still the camera
+is steady, the quad path works, and the shape comes out of the tuned classifier -
+the one that is not to be touched. When the shape is known, `qr` is published and
+the robot holds for `--card-hold-ms` (the rules' action window) before resuming.
+
+Measured on four real-robot clips: 7/157 card frames held presence before the
+blur-tolerant cue, 142/157 after, with 0 false positives on 369 card-free frames.
+`13_14`, which fired on none of its 173 frames, now fires on 29 in one contiguous
+run that brackets the card.
+
+**The temporal window counts cue calls, not video frames**, so `--shape-every`
+changes its timescale: at the default 6 a 9-call window spans about 1.8 s, not
+0.3 s. Lower `--shape-every` when working on cards.
+
 Card detection costs real time. Timed on the Orin at 1280x720, `ShapeDetector`
 takes 31 ms with no card in view and 95-122 ms with one, against 29 ms for
-`LineDetector` alone. `--shape-every` sets how often it runs; `--no-shape-detect`
-removes the cost entirely and leaves `qr` at -1.
+`LineDetector` alone. The cue itself is 2.6 ms. `--shape-every` sets how often it
+runs; `--no-shape-detect` removes the cost entirely and leaves `qr` at -1.
 
 ## 1. Check out the draft branch and prepare the environment
 
