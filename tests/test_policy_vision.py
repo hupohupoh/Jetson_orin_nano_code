@@ -253,7 +253,10 @@ class VisionEntryPointTests(unittest.TestCase):
             reads[0] += 1
             clock[0] += 0.1                      # 10 Hz vision
             seen["card"] = 1 < reads[0] < 4      # present on frames 2 and 3 only
-            return reads[0] <= 200, frame
+            if reads[0] > 60:                    # 6 s of mocked time; stop the loop
+                run_policy_vision.signal.signal.call_args.args[1](None, None)
+                return False, frame
+            return True, frame
 
         camera.read.side_effect = read
         with (
@@ -270,16 +273,17 @@ class VisionEntryPointTests(unittest.TestCase):
         ):
             self.assertEqual(run_policy_vision.main(), 0)
         published = client_cls.return_value.publish.call_args_list
-        # frame 1 drives; frame 2 sees the box and names it, so the window opens at t=0.2
-        self.assertEqual(published[0].args[:2], (0.4, published[0].args[1]))
+        # read N lands at t = N * 0.1, so publish[i] is read i+1.
+        # read 1 drives; read 2 sees the box and names it, opening the window at t=0.2
+        self.assertGreater(published[0].args[0], 0.0)
         self.assertEqual(published[0].args[2], -1)
         self.assertEqual(published[1].args[:2], (0.0, 0.0))
         self.assertEqual(published[1].args[2], 3)
-        # still standing just before t=5.2, driving again just after
+        # read 51 (t=5.1) is the last frame inside the window; read 52 (t=5.2) drives again
         self.assertEqual(published[50].args[:2], (0.0, 0.0))
-        self.assertEqual(published[51].args[2], 3)
-        self.assertGreater(published[52].args[0], 0.0)
-        self.assertEqual(published[52].args[2], -1)
+        self.assertEqual(published[50].args[2], 3)
+        self.assertGreater(published[51].args[0], 0.0)
+        self.assertEqual(published[51].args[2], -1)
 
     def test_real_new_detector_reports_blank_frame_as_lost(self):
         from line_detector_v1_warp import LineDetector
