@@ -165,7 +165,8 @@ def main():
             processed = time.monotonic()
             frames += 1
             if shape is not None and frames % args.shape_every == 0:
-                action, _ = shape.update(frame, lane_offset_cm=debug.get("base_err_cm"))
+                action, _ = shape.update(
+                    frame, lane_offset_cm=float(debug.get("base_err_cm", 0.0)))
                 if action is not None:
                     card_action = action
                     card_until = processed + args.card_hold_ms / 1000.0
