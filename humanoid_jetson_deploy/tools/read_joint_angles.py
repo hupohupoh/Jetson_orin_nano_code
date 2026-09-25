@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Record STM32 joint angles: a continuous stream plus named key points.
 
-The STM32 broadcasts its state continuously, so this tool only reads it. Every
-frame this tool sends carries ``command_flags=0``: the enable bit stays clear and
-no motor can move, so you can position the robot by hand, then press Enter to
-capture the pose.
+Before the first state, this tool sends disabled probe frames unless
+``--no-keepalive`` is selected. Every frame it sends carries
+``command_flags=0`` and zero gains, so you can position the robot by hand,
+then press Enter to capture the pose.
 
 Two files are written per session, in joint order ``config.JOINT_NAMES`` (the
 order the policy model is loaded with):
@@ -169,7 +169,8 @@ class StreamLogger:
 
     def close(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=0.5)
+        if self._thread.is_alive():
+            self._thread.join(timeout=0.5)
         if self._file is not None and not self._file.closed:
             self._file.close()
 
@@ -217,10 +218,28 @@ class CaptureSession:
             return None
         return state
 
-    def wait_for_first(self, timeout_s: float = 5.0):
-        state = self.link.wait_for_state(timeout_s=timeout_s)
-        validate_state(state)
-        return state
+    def wait_for_first(self, timeout_s: float = 5.0, send_probe: bool = True):
+        if not send_probe:
+            state = self.link.wait_for_state(timeout_s=timeout_s)
+            validate_state(state)
+            return state
+        deadline = time.monotonic() + timeout_s
+        disabled_target = np.zeros(config.NUM_JOINTS, dtype=np.float32)
+        while time.monotonic() < deadline:
+            started = time.monotonic()
+            self.link.send_command(monotonic_us(), disabled_target, 0.0, 0.0, 0)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                state = self.link.wait_for_state(timeout_s=min(1.0 / KEEPALIVE_HZ, remaining))
+            except TimeoutError:
+                time.sleep(max(0.0, min(1.0 / KEEPALIVE_HZ - (time.monotonic() - started),
+                                        deadline - time.monotonic())))
+                continue
+            validate_state(state)
+            return state
+        raise TimeoutError("No valid STM32 state packet received")
 
     def snapshot(self, samples: int, tolerance_rad: float, timeout_s: float) -> Snapshot:
         """Average the newest ``samples`` frames, stopping early once they agree.
@@ -463,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
     session = CaptureSession(link)
 
     try:
-        first = session.wait_for_first(timeout_s=5.0)
+        first = session.wait_for_first(timeout_s=5.0, send_probe=not args.no_keepalive)
         print(f"First state packet: sequence={first.sequence} flags=0x{first.status_flags:08X}")
         stream.start()
         store.save()  # create the file up front, even if nothing is captured

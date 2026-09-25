@@ -126,6 +126,43 @@ class KeypointStoreTests(unittest.TestCase):
 
 
 class CaptureSessionTests(unittest.TestCase):
+    def test_first_state_is_bootstrapped_by_disabled_command(self):
+        class ReplyOnlyLink:
+            def __init__(self):
+                self.sent = []
+
+            def send_command(self, timestamp_us, joint_target, kp_scale, kd_scale, command_flags):
+                self.sent.append((np.asarray(joint_target).copy(), kp_scale, kd_scale, command_flags))
+
+            def wait_for_state(self, timeout_s=3.0):
+                if not self.sent:
+                    raise TimeoutError("no command received")
+                return make_state(1, config.Q_DEFAULT)
+
+        link = ReplyOnlyLink()
+        state = CaptureSession(link).wait_for_first(timeout_s=0.1)
+        self.assertEqual(state.sequence, 1)
+        self.assertTrue(link.sent)
+        for target, kp, kd, flags in link.sent:
+            np.testing.assert_array_equal(target, np.zeros(config.NUM_JOINTS))
+            self.assertEqual((kp, kd, flags), (0.0, 0.0, 0))
+
+    def test_no_keepalive_waits_without_sending_probe(self):
+        class SilentLink:
+            def __init__(self):
+                self.sent = []
+
+            def send_command(self, *args):
+                self.sent.append(args)
+
+            def wait_for_state(self, timeout_s=3.0):
+                raise TimeoutError("no state")
+
+        link = SilentLink()
+        with self.assertRaises(TimeoutError):
+            CaptureSession(link).wait_for_first(timeout_s=0.01, send_probe=False)
+        self.assertEqual(link.sent, [])
+
     def test_snapshot_averages_a_stable_window(self):
         session = CaptureSession(FakeLink(config.Q_DEFAULT))
         snapshot = session.snapshot(samples=4, tolerance_rad=0.01, timeout_s=2.0)
@@ -175,6 +212,10 @@ class StreamLoggerTests(unittest.TestCase):
 
     def tearDown(self):
         self._tmp.cleanup()
+
+    def test_close_before_start_does_not_hide_first_state_timeout(self):
+        logger = StreamLogger(FakeLink(config.Q_DEFAULT), self.path, 20.0, True)
+        logger.close()
 
     def _run_logger(self, log_hz: float, seconds: float = 0.08, keepalive: bool = True):
         link = FakeLink(config.Q_DEFAULT)

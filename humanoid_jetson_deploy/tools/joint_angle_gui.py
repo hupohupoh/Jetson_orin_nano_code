@@ -885,7 +885,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        first = session.wait_for_first(timeout_s=5.0)
+        first = session.wait_for_first(timeout_s=5.0, send_probe=not args.no_keepalive)
         print(f"First state packet: sequence={first.sequence} "
               f"flags=0x{first.status_flags:08X}")
         store.save()

@@ -5,13 +5,15 @@ from __future__ import annotations
 import threading
 import time
 
-import serial
 
 from protocol import CommandPacket, FrameDecoder, StatePacket, pack_command
 
 
 class SerialLink:
     def __init__(self, port: str, baudrate: int = 921600) -> None:
+        import serial
+
+        self._serial_module = serial
         self.serial = serial.Serial(port=port, baudrate=baudrate, timeout=0.01, write_timeout=0.05)
         self.decoder = FrameDecoder()
         self._latest_state: StatePacket | None = None
@@ -27,7 +29,7 @@ class SerialLink:
         while not self._stop.is_set():
             try:
                 chunk = self.serial.read(max(1, self.serial.in_waiting))
-            except serial.SerialException:
+            except self._serial_module.SerialException:
                 self._stop.set()
                 return
             if not chunk:
