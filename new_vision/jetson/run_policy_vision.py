@@ -53,10 +53,13 @@ def parse_args():
                         help="IIR pole on the D term; higher is smoother, 0 disables the filter")
     parser.add_argument("--bias-cm", type=float,
                         default=float(os.getenv("STEER_BIAS_CM", "0")),
-                        help="Standing trim added to fused_err_cm, shifting where the loop "
-                             "settles to cancel a one-sided lateral offset. Only correct if "
-                             "the offset is present on straights too; a curve-only offset is "
-                             "curvature and belongs to the curve terms")
+                        help="Standing trim added to fused_err_cm on curves, shifting where "
+                             "the loop settles to cancel a one-sided lateral offset. Set it "
+                             "to the err the log shows standing in the curve")
+    parser.add_argument("--bias-gate-px", type=float,
+                        default=float(os.getenv("STEER_BIAS_GATE_PX", "12")),
+                        help="abs(curve_px) at which --bias-cm is fully applied; it fades "
+                             "to zero by curve_px 0 so straights are untouched")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--max-seconds", type=float, default=0.0,
                         help="0 runs until Ctrl+C")
@@ -87,7 +90,7 @@ def main():
         curve_gains=gains("CURVE", (0.83, 0.006, 0.16)),
         integral_limit=float(os.getenv("JETSON_PID_I_CLAMP", "60")),
         lost_hold_s=args.lost_hold_s, deriv_pole=args.deriv_pole,
-        bias_cm=args.bias_cm,
+        bias_cm=args.bias_cm, bias_gate_px=args.bias_gate_px,
     )
     # Lazy imports keep --help and controller tests usable without a camera stack.
     import cv2
@@ -140,6 +143,7 @@ def main():
                 print(f"[vision -> connector] vx={vx:+.3f} m/s wz={wz:+.3f} rad/s "
                       f"steer={controller.last_steer:+.2f}cm "
                       f"err={debug.get('fused_err_cm', 0.0):+.1f}cm "
+                      f"err_eff={controller.last_err_eff:+.1f}cm "
                       f"ang={debug.get('angle_err_deg', 0.0):+.1f}deg "
                       f"curve={int(bool(debug.get('curve_mode', False)))} "
                       f"curve_px={debug.get('curve_px', 0.0):+.0f}(thr18) "

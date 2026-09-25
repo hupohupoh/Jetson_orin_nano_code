@@ -31,10 +31,10 @@ class SteeringController:
                  yaw_sign=1, step_len_cm=8.0, preview_gain=1.0,
                  straight_gains=(0.83, 0.004, 0.095),
                  curve_gains=(0.83, 0.006, 0.16), integral_limit=60.0,
-                 lost_hold_s=0.2, deriv_pole=0.78, bias_cm=0.0):
+                 lost_hold_s=0.2, deriv_pole=0.78, bias_cm=0.0, bias_gate_px=12.0):
         values = (vx, max_wz, steer_full_scale_cm, yaw_sign, step_len_cm,
                   preview_gain, integral_limit, lost_hold_s, deriv_pole, bias_cm,
-                  *straight_gains, *curve_gains)
+                  bias_gate_px, *straight_gains, *curve_gains)
         if not all(math.isfinite(v) for v in values):
             raise ValueError("controller settings must be finite")
         if not 0 <= vx <= 1 or not 0 <= max_wz <= 0.5:
@@ -53,11 +53,16 @@ class SteeringController:
         self.step_len, self.preview_gain = step_len_cm, preview_gain
         self.straight_gains, self.curve_gains = straight_gains, curve_gains
         self.integral_limit = integral_limit
-        # Additive trim on fused_err_cm. The loop settles where the P term
-        # balances the disturbance, so a standing lateral offset is removed by
-        # shifting where that balance reads zero, not by offsetting wz - a
-        # constant wz would only bend a straight into a very large circle.
+        if bias_gate_px <= 0:
+            raise ValueError("bias gate must be positive")
+        # Additive trim on fused_err_cm, faded in by |curve_px|. The loop settles
+        # where the P term balances the disturbance, so a standing lateral offset
+        # is removed by shifting where that balance reads zero, not by offsetting
+        # wz - a constant wz would only bend a straight into a very large circle.
+        # Gating it keeps a curve-only offset from pushing the straights off centre.
         self.bias_cm = bias_cm
+        self.bias_gate_px = bias_gate_px
+        self.last_err_eff = 0.0
         self.reset()
         self.lost_hold_s = lost_hold_s
         # Patience deliberately lives outside reset(): command() calls reset() on
@@ -116,7 +121,15 @@ class SteeringController:
             self.hold = (0.0, 0.0)
             return self.hold
         dt = clamp(dt, 0.01, 0.2)
-        err += self.bias_cm
+        # curve_mode cannot be this gate: it needs |curve_px| >= curve_switch_px
+        # (18) while the real curve reads 9..14, so it opens on 6-13% of curve
+        # frames and mis-fires on near-straight ones. |curve_px| fades instead.
+        try:
+            gate = abs(float(debug.get("curve_px", 0.0))) / self.bias_gate_px
+        except (TypeError, ValueError):
+            gate = 0.0
+        err += self.bias_cm * (clamp(gate, 0.0, 1.0) if math.isfinite(gate) else 0.0)
+        self.last_err_eff = err
         curve = bool(debug.get("curve_mode", False))
         # Clear only on the curve -> straight transition. The previous condition
         # (bottom lock valid AND previous frame was a curve) fired on every frame

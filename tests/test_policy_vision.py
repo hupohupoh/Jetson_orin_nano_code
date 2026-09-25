@@ -26,9 +26,10 @@ import config
 import run_policy_vision
 
 
-def detection(error=10.0, angle=0.0, lost=0, curve=False):
+def detection(error=10.0, angle=0.0, lost=0, curve=False, curve_px=0.0):
     return dict(fused_err=error / 52.8, fused_err_cm=error, angle_err_deg=angle,
-                lost_frames=lost, curve_mode=curve, bottom_lock_valid=True)
+                lost_frames=lost, curve_mode=curve, bottom_lock_valid=True,
+                curve_px=curve_px)
 
 
 class SteeringTests(unittest.TestCase):
@@ -59,14 +60,21 @@ class SteeringTests(unittest.TestCase):
         controller = SteeringController()
         self.assertEqual(controller.command(detection(0.0, 22.0), 0.8, 0.02)[1], 0.0)
 
-    def test_bias_moves_the_zero_point_the_loop_settles_on(self):
-        plain = SteeringController(straight_gains=(1, 0, 0), steer_full_scale_cm=50)
+    def test_bias_fades_in_with_curve_px_and_moves_the_zero_point(self):
         trimmed = SteeringController(straight_gains=(1, 0, 0), steer_full_scale_cm=50,
-                                     bias_cm=5.0)
-        self.assertEqual(plain.command(detection(0.0), 0.8, 0.02)[1], 0.0)
-        self.assertGreater(trimmed.command(detection(0.0), 0.8, 0.02)[1], 0.0)
-        # A centred reading must stop being centred once the trim is applied.
-        self.assertEqual(trimmed.command(detection(-5.0), 0.8, 0.02)[1], 0.0)
+                                     bias_cm=5.0, bias_gate_px=10.0)
+        trimmed.command(detection(0.0, curve_px=0.0), 0.8, 0.02)
+        self.assertEqual(trimmed.last_err_eff, 0.0)        # straight: straights untouched
+        trimmed.command(detection(0.0, curve_px=5.0), 0.8, 0.02)
+        self.assertAlmostEqual(trimmed.last_err_eff, 2.5)  # half way to the gate
+        trimmed.command(detection(0.0, curve_px=-50.0), 0.8, 0.02)
+        self.assertAlmostEqual(trimmed.last_err_eff, 5.0)  # gate saturated
+        self.assertGreater(trimmed.command(detection(0.0, curve_px=-50.0), 0.8, 0.02)[1], 0.0)
+        # With the trim open, the loop now settles where the raw reading is -5 cm.
+        self.assertEqual(trimmed.command(detection(-5.0, curve_px=-50.0), 0.8, 0.02)[1], 0.0)
+        # A missing curve_px (older debug dict) must not open the gate.
+        self.assertEqual(SteeringController(bias_cm=5.0)
+                         .command({**detection(0.0), "curve_px": None}, 0.8, 0.02)[1], 0.0)
 
     def test_invalid_or_lost_detection_stops_and_resets(self):
         controller = SteeringController(lost_hold_s=0.0)
@@ -115,7 +123,8 @@ class SteeringTests(unittest.TestCase):
         for kwargs in (dict(max_wz=1.5), dict(vx=float("nan")), dict(yaw_sign=0),
                        dict(steer_full_scale_cm=0), dict(step_len_cm=-1),
                        dict(lost_hold_s=-1.0), dict(deriv_pole=1.0),
-                       dict(deriv_pole=-0.1), dict(bias_cm=float("nan"))):
+                       dict(deriv_pole=-0.1), dict(bias_cm=float("nan")),
+                       dict(bias_gate_px=0.0)):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 SteeringController(**kwargs)
 
