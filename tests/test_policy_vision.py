@@ -168,7 +168,7 @@ class VisionEntryPointTests(unittest.TestCase):
         detector = Mock()
         detector.process.return_value = (0, 0, 0.8, None, detection())
         with (
-            patch("sys.argv", ["run_policy_vision.py", "--headless"]),
+            patch("sys.argv", ["run_policy_vision.py", "--headless", "--no-shape-detect"]),
             patch.object(run_policy_vision.signal, "signal") as signals,
             patch.object(run_policy_vision, "ConnectorClient") as client_cls,
             patch("utils.open_camera", return_value=camera),
@@ -190,9 +190,47 @@ class VisionEntryPointTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[0].args[0], 0.4)
             self.assertNotEqual(calls[0].args[1], 0.0)  # steering published; polarity is yaw-sign's business
-            self.assertEqual(calls[1].args, (0, 0))
+            self.assertEqual(calls[1].args, (0, 0, -1))
             client_cls.return_value.close.assert_called_once()
             camera.release.assert_called_once()
+
+    def test_card_detection_publishes_qr_and_holds_it(self):
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        camera = Mock()
+        camera.isOpened.return_value = True
+        camera.get.side_effect = [1280, 720]
+        detector = Mock()
+        detector.process.return_value = (0, 0, 0.8, None, detection())
+        shape = Mock()
+        shape.update.side_effect = [(3, {}), (None, {})]  # fires once, like the cooldown
+        shape.action_map = {"square": 3}
+        with (
+            patch("sys.argv", ["run_policy_vision.py", "--headless",
+                               "--shape-every", "1", "--card-hold-ms", "3000"]),
+            patch.object(run_policy_vision.signal, "signal"),
+            patch.object(run_policy_vision, "ConnectorClient") as client_cls,
+            patch("utils.open_camera", return_value=camera),
+            patch("line_detector_v1_warp.LineDetector", return_value=detector),
+            patch("shape_detector.ShapeDetector", return_value=shape),
+            patch("cv2.imshow", side_effect=AssertionError("headless must not open windows")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            reads = 0
+            def read():
+                nonlocal reads
+                reads += 1
+                if reads <= 3:
+                    return True, frame
+                run_policy_vision.signal.signal.call_args.args[1](None, None)
+                return False, None
+            camera.read.side_effect = read
+            self.assertEqual(run_policy_vision.main(), 0)
+            published = [c.args[2] for c in client_cls.return_value.publish.call_args_list]
+            # Detected on frame 1, held across frame 2 and the dropped-frame path.
+            self.assertEqual(published[:3], [3, 3, 3])
+            # Velocity is untouched: the card is reported, not acted on.
+            self.assertEqual(client_cls.return_value.publish.call_args_list[0].args[0], 0.4)
+            self.assertEqual(shape.update.call_args_list[0].kwargs["lane_offset_cm"], 0.0)
 
     def test_real_new_detector_reports_blank_frame_as_lost(self):
         from line_detector_v1_warp import LineDetector
