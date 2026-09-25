@@ -154,7 +154,7 @@ class SteeringController:
 
 
 class ConnectorClient:
-    """Same wire format/address as old_vision/connector_client.py."""
+    """Use the legacy connector client's wire format and address."""
 
     def __init__(self, host="127.0.0.1", port=5006):
         self.address = (host, port)

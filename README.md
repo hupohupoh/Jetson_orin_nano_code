@@ -92,7 +92,7 @@ The V2 CPU/GPU `run_robot.py` scripts are separate serial-controller entry point
 
 See [the detailed guide](docs/closed_loop_vision.md) for camera setup, exact
 three-terminal commands, dry runs, physical tests, yaw-sign tuning and watchdogs.
-`old_vision/` is retained as reference. Shape actions and bar crossing are outside
+Shape actions and bar crossing are outside
 this line-following integration.
 
 ## Tests
