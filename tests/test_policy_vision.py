@@ -337,7 +337,8 @@ class VisionEntryPointTests(unittest.TestCase):
         self.assertAlmostEqual(published[0].args[0], 0.4)      # read 1: no card, full speed
         self.assertAlmostEqual(published[1].args[0], 0.2)      # read 2: card seen, slows
         self.assertAlmostEqual(published[4].args[0], 0.2)      # read 5: still slow after the blip
-        self.assertAlmostEqual(published[6].args[0], 0.0)      # read 7: centroid low -> stops
+        self.assertAlmostEqual(published[6].args[0], 0.2)      # read 7: centroid still high
+        self.assertAlmostEqual(published[7].args[0], 0.0)      # read 8: centroid low -> stops
         self.assertEqual(out.getvalue().count("stand still"), 1)  # triggered exactly once
         from line_detector_v1_warp import LineDetector
         detector = LineDetector(1280, 720)
