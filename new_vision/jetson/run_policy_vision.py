@@ -52,7 +52,7 @@ def parse_args():
                         default=float(os.getenv("JETSON_PID_D_FILTER", "0.78")),
                         help="IIR pole on the D term; higher is smoother, 0 disables the filter")
     parser.add_argument("--bias-cm", type=float,
-                        default=float(os.getenv("STEER_BIAS_CM", "0")),
+                        default=float(os.getenv("STEER_BIAS_CM", "5")),
                         help="Standing trim added to fused_err_cm on curves, shifting where "
                              "the loop settles to cancel a one-sided lateral offset. Set it "
                              "to the err the log shows standing in the curve")

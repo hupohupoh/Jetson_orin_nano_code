@@ -226,10 +226,14 @@ velocity. With the defaults, 10 cm of final PID steering gives -0.1 rad/s.
   heading term before the lateral error contributes anything. Off, the curve
   command comes from the P term alone, which costs a standing offset - measured
   at roughly 5 cm of `err` in the curve - but leaves the P term in control.
-- `--bias-cm`: default 0. Adds a constant to `fused_err_cm`, moving where the loop
-  settles. Only correct when the standing offset is the same on straights and
-  curves; an offset that appears only in curves is curvature and belongs to the
-  curve terms, and a constant trim would push the straights off-centre.
+- `--bias-cm`: default 5, faded in by `abs(curve_px) / --bias-gate-px`. Adds a
+  constant to `fused_err_cm`, moving where the loop settles, so the P term's
+  standing offset in the curve - measured at roughly 5 cm - is cancelled without
+  pushing the straights off centre. It is a track calibration, not a law: remeasure
+  it if the camera mount or the track geometry changes. 0 restores no trim.
+- `--bias-gate-px`: default 12; the `abs(curve_px)` at which the trim is fully on.
+  The real curve reads 9..14, so 12 puts the gate near 1 through the curve and at
+  0 by curve_px 0.
 - `--lost-hold-s`: default 0.2; how long to hold the last command before
   stopping on line loss.
 - `--deriv-pole`: default 0.78; raise for a smoother D term, lower for faster.
