@@ -67,9 +67,16 @@ def parse_args():
                         help="Skip geometric card detection entirely; qr stays -1")
     parser.add_argument("--card-hold-ms", type=float,
                         default=float(os.getenv("CARD_HOLD_MS", "3000")),
-                        help="How long qr keeps reporting a detected card. 3000 matches the "
-                             "rules' action window; acting on it is the receiver's business. "
-                             "Keep it under ShapeDetector cooldown_ms so cards cannot re-fire")
+                        help="How long qr keeps reporting an identified card. 3000 matches "
+                             "the rules' action window; acting on it is the receiver's "
+                             "business. Keep it under ShapeDetector cooldown_ms so cards "
+                             "cannot re-fire")
+    parser.add_argument("--card-stop-ms", type=float,
+                        default=float(os.getenv("CARD_STOP_MS", "3000")),
+                        help="Stand still this long as soon as a card-sized box appears, "
+                             "before the shape is known - the box is easy to see, the shape "
+                             "is not. Detection then runs every frame while stopped. "
+                             "0 disables stopping")
     parser.add_argument("--shape-every", type=int,
                         default=max(1, int(os.getenv("SHAPE_EVERY", "6"))),
                         help="Run card detection every N frames. Measured at 1280x720: "
@@ -91,6 +98,8 @@ def parse_args():
         parser.error("invalid camera geometry or max-seconds")
     if not math.isfinite(args.card_hold_ms) or args.card_hold_ms < 0:
         parser.error("card-hold-ms must be finite and nonnegative")
+    if not math.isfinite(args.card_stop_ms) or args.card_stop_ms < 0:
+        parser.error("card-stop-ms must be finite and nonnegative")
     if args.shape_every < 1:
         parser.error("shape-every must be at least 1")
     return args
@@ -151,6 +160,9 @@ def main():
         frames = 0
         card_action = -1
         card_until = 0.0
+        stop_until = 0.0
+        stop_latched = False
+        card_dbg = {}
         while not stopped:
             now = time.monotonic()
             if args.max_seconds > 0 and now - start >= args.max_seconds:
@@ -167,18 +179,34 @@ def main():
             _, _, confidence, visualization, debug = detector.process(frame)
             processed = time.monotonic()
             frames += 1
-            if shape is not None and frames % args.shape_every == 0:
-                action, _ = shape.update(
+            # Stopped in front of a card, the camera is steady, so the classification
+            # can have every frame. --shape-every only throttles the driving case.
+            if shape is not None and (frames % args.shape_every == 0
+                                      or processed < stop_until):
+                action, card_dbg = shape.update(
                     frame, lane_offset_cm=float(debug.get("base_err_cm", 0.0)))
                 if action is not None:
                     card_action = action
                     card_until = processed + args.card_hold_ms / 1000.0
                     print(f"[shape] qr={action} ({shape_names.get(action, '?')}) "
                           f"held {args.card_hold_ms:.0f} ms", flush=True)
+                # A card-sized box is enough to stop; the shape is not needed for it,
+                # so the stop does not wait on a classification that may never settle.
+                present = bool(card_dbg.get("presence"))
+                if present and not stop_latched and processed >= stop_until:
+                    stop_until = processed + args.card_stop_ms / 1000.0
+                    stop_latched = True
+                    controller.reset()
+                    print(f"[shape] card present -> stand still "
+                          f"{args.card_stop_ms:.0f} ms", flush=True)
+                elif not present:
+                    stop_latched = False
             if card_action != -1 and processed >= card_until:
                 card_action = -1
             vx, wz = controller.command(debug, confidence, processed - previous)
             previous = processed
+            if processed < stop_until:
+                vx, wz = 0.0, 0.0
             client.publish(vx, wz, card_action)
             if processed - last_log >= 0.5:
                 print(f"[vision -> connector] vx={vx:+.3f} m/s wz={wz:+.3f} rad/s "

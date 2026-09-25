@@ -101,6 +101,10 @@ class ShapeDetector:
             "warp_size": 200,
             "warp_inset": 0.14,      # warp向内收缩比例（外框环不进warp）
             "track_iou": 0.5,        # 帧间续锁IoU
+            # 框顶边必须落到画面这个高度以下才算"够近"。1/3 = 下 2/3。
+            # 触发只看这一条：找框本身已经把 10cm 地面方形 + max_dist_cm 卡住了，
+            # 形状分类和车道位置不再参与"要不要停"。
+            "presence_top_frac": 1.0 / 3.0,
         }
 
         # 动作映射: shape_name -> action_number (1-6)
@@ -290,11 +294,18 @@ class ShapeDetector:
             dbg["quad"] = q_orig
             dbg["quad_work"] = best  # 工作图(960×540)坐标，用于叠加在二值图上
             dbg["closure"] = best_score
+            # 存在信号：只看"有没有一个够近的框"，不看它是什么形状。
+            # 停下来的决定用它；是什么形状等停稳了再分类。
+            dbg["box_top_work"] = float(best[:, 1].min())
+            dbg["presence"] = bool(
+                self.armed
+                and dbg["box_top_work"] >= WORK_H * self.cfg["presence_top_frac"])
         else:
             # 这一帧没有合格框，就是没有图卡 —— 不做兜底猜测。
             # （兜底拿最大连通域的外接矩形硬判形状，既没有触发权，
             #  产生的分类结果也只会污染统计）
             dbg["fallback"] = True
+            dbg["presence"] = False
             shape = None
 
         if shape is None:
@@ -1236,14 +1247,15 @@ class ShapeDetector:
         if cx is None or not self.armed:
             return None, dbg
 
-        # 框必须完整落到画面下半（顶边过中线）—— 这才是"够近了"
-        y_mid = WORK_H * 0.5
+        # 位置闸门只剩一条：框顶边落到画面下 2/3（= 顶边过了上 1/3 线）。
+        y_mid = WORK_H * self.cfg["presence_top_frac"]
         dbg["box_top"] = box_top
         dbg["y_mid"] = y_mid
         if box_top < y_mid:
             return None, dbg
 
-        # 位置：框质心须在赛道两条边线之内。
+        # 车道偏移照算，只记录不拦截。找框本身已经把"10cm 地面方形 + max_dist_cm"
+        # 卡住了；机器人停稳后卡就在正前方，再拿 lane_offset_cm 去拦只会漏检。
         # px_per_cm 由框宽反推（图卡物理宽 10cm），无需外部传像素尺度。
         px_per_cm = box_w / 10.0
         lane_cx = WORK_W / 2.0 + (self.lane_offset_cm or 0.0) * px_per_cm
@@ -1251,8 +1263,6 @@ class ShapeDetector:
         off = abs(cx - lane_cx)
         dbg["lane_offset_px"] = off
         dbg["lane_half_px"] = half
-        if off >= half:
-            return None, dbg
 
         # 软加分（仅记录，不拦截）
         dbg["bonus_center"] = 1.0 - off / max(half, 1e-6)
