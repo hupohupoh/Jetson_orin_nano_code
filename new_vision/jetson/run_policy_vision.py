@@ -126,8 +126,11 @@ def main():
             client.publish(vx, wz)
             if processed - last_log >= 0.5:
                 print(f"[vision -> connector] vx={vx:+.3f} m/s wz={wz:+.3f} rad/s "
-                      f"steer={controller.last_steer:+.2f}cm conf={confidence:.3f} "
-                      f"lost={debug.get('lost_frames', '?')}", flush=True)
+                      f"steer={controller.last_steer:+.2f}cm "
+                      f"err={debug.get('fused_err_cm', 0.0):+.1f}cm "
+                      f"ang={debug.get('angle_err_deg', 0.0):+.1f}deg "
+                      f"curve={int(bool(debug.get('curve_mode', False)))} "
+                      f"conf={confidence:.3f} lost={debug.get('lost_frames', '?')}", flush=True)
                 last_log = processed
             if not args.headless:
                 cv2.putText(frame, f"vx={vx:+.3f} wz={wz:+.3f} Q=quit", (10, 25),
