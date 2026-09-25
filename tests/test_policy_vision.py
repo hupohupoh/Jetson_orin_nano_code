@@ -245,7 +245,8 @@ class VisionEntryPointTests(unittest.TestCase):
         shape = Mock()
         shape.action_map = {"square": 3}
         shape.update.side_effect = lambda *a, **k: (
-            (3, {"presence": True}) if seen["card"] else (None, {"presence": False}))
+            (3, {"presence": True, "presence_cy_frac": 0.9}) if seen["card"]
+            else (None, {"presence": False, "presence_cy_frac": None}))
         clock = [0.0]
         reads = [0]
 
@@ -289,7 +290,55 @@ class VisionEntryPointTests(unittest.TestCase):
         self.assertEqual(published[resumed - 1].args[2], 3)   # still holding
         self.assertEqual(published[resumed].args[2], -1)      # released with the resume
 
-    def test_real_new_detector_reports_blank_frame_as_lost(self):
+    def test_a_distant_card_only_slows_down_and_a_flicker_does_not_re_trigger(self):
+        """The cue drops out while walking. One absent call used to re-arm the stop,
+        so the robot crept forward and stopped again, then sat there for good."""
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        camera = Mock()
+        camera.isOpened.return_value = True
+        camera.get.side_effect = [1280, 720]
+        detector = Mock()
+        detector.process.return_value = (0, 0, 0.8, None, detection())
+        # reads 2-5: a card, far away (centroid above the trigger line); read 4 drops out
+        plan = {2: 0.40, 3: 0.40, 5: 0.40, 6: 0.40, 7: 0.40, 8: 0.90, 9: 0.90}
+        shape = Mock()
+        shape.action_map = {"square": 3}
+        shape.update.side_effect = lambda *a, **k: (
+            (None, {"presence": True, "presence_cy_frac": plan[reads[0]]})
+            if reads[0] in plan else (None, {"presence": False, "presence_cy_frac": None}))
+        clock = [0.0]
+        reads = [0]
+
+        def read():
+            reads[0] += 1
+            clock[0] += 0.1
+            if reads[0] > 30:
+                run_policy_vision.signal.signal.call_args.args[1](None, None)
+                return False, frame
+            return True, frame
+
+        camera.read.side_effect = read
+        out = io.StringIO()
+        with (
+            patch("sys.argv", ["run_policy_vision.py", "--headless", "--shape-every", "1",
+                               "--card-slow-vx", "0.2", "--card-trigger-frac", "0.75",
+                               "--card-clear-calls", "4"]),
+            patch.object(run_policy_vision.signal, "signal"),
+            patch.object(run_policy_vision, "ConnectorClient") as client_cls,
+            patch("utils.open_camera", return_value=camera),
+            patch("line_detector_v1_warp.LineDetector", return_value=detector),
+            patch("shape_detector.ShapeDetector", return_value=shape),
+            patch.object(run_policy_vision.time, "monotonic", lambda: clock[0]),
+            patch("cv2.imshow", side_effect=AssertionError("headless must not open windows")),
+            contextlib.redirect_stdout(out),
+        ):
+            self.assertEqual(run_policy_vision.main(), 0)
+        published = client_cls.return_value.publish.call_args_list
+        self.assertAlmostEqual(published[0].args[0], 0.4)      # read 1: no card, full speed
+        self.assertAlmostEqual(published[1].args[0], 0.2)      # read 2: card seen, slows
+        self.assertAlmostEqual(published[4].args[0], 0.2)      # read 5: still slow after the blip
+        self.assertAlmostEqual(published[6].args[0], 0.0)      # read 7: centroid low -> stops
+        self.assertEqual(out.getvalue().count("stand still"), 1)  # triggered exactly once
         from line_detector_v1_warp import LineDetector
         detector = LineDetector(1280, 720)
         _, _, confidence, _, debug = detector.process(np.full((720, 1280, 3), 255, np.uint8))

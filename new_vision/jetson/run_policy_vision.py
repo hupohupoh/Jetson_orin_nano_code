@@ -73,9 +73,23 @@ def parse_args():
     parser.add_argument("--card-stop-ms", type=float,
                         default=float(os.getenv("CARD_STOP_MS", "3000")),
                         help="Stand still at most this long waiting for the shape to "
-                             "settle, counted from the moment a card-sized box appeared. "
+                             "settle, counted from the moment the box came close enough. "
                              "Bounds the wait when no shape is ever identified. "
                              "0 disables stopping")
+    parser.add_argument("--card-trigger-frac", type=float,
+                        default=float(os.getenv("CARD_TRIGGER_FRAC", "0.75")),
+                        help="Box centroid height in the frame (0=top, 1=bottom) at which "
+                             "the robot stops and identifies the shape. 0.75 is the lower "
+                             "quarter. Seeing a card earlier only slows it down")
+    parser.add_argument("--card-slow-vx", type=float,
+                        default=float(os.getenv("CARD_SLOW_VX", "0.2")),
+                        help="Forward speed while a card is in view but not yet close "
+                             "enough to act on")
+    parser.add_argument("--card-clear-calls", type=int,
+                        default=max(1, int(os.getenv("CARD_CLEAR_CALLS", "4"))),
+                        help="Consecutive detection calls with no card before the flag "
+                             "drops and the same card may trigger again. One absent frame "
+                             "used to be enough, which let a flickering cue re-trigger")
     parser.add_argument("--shape-every", type=int,
                         default=max(1, int(os.getenv("SHAPE_EVERY", "6"))),
                         help="Run card detection every N frames. Measured at 1280x720: "
@@ -99,6 +113,12 @@ def parse_args():
         parser.error("card-hold-ms must be finite and nonnegative")
     if not math.isfinite(args.card_stop_ms) or args.card_stop_ms < 0:
         parser.error("card-stop-ms must be finite and nonnegative")
+    if not math.isfinite(args.card_slow_vx) or not 0 <= args.card_slow_vx <= 1:
+        parser.error("card-slow-vx must be in [0, 1]")
+    if not math.isfinite(args.card_trigger_frac) or not 0 < args.card_trigger_frac <= 1:
+        parser.error("card-trigger-frac must be in (0, 1]")
+    if args.card_clear_calls < 1:
+        parser.error("card-clear-calls must be at least 1")
     if args.shape_every < 1:
         parser.error("shape-every must be at least 1")
     return args
@@ -160,7 +180,9 @@ def main():
         card_action = -1
         card_until = 0.0
         stop_until = 0.0
-        stop_latched = False
+        card_flag = False        # a card is in view on this approach
+        card_absent = 0          # consecutive detection calls without one
+        card_triggered = False   # this card has already been acted on
         card_dbg = {}
         while not stopped:
             now = time.monotonic()
@@ -190,21 +212,33 @@ def main():
                     card_until = processed + args.card_hold_ms / 1000.0
                     print(f"[shape] qr={action} ({shape_names.get(action, '?')}) "
                           f"held {args.card_hold_ms:.0f} ms", flush=True)
-                # A card-sized box is enough to stop; the shape is not needed for it,
-                # so the stop does not wait on a classification that may never settle.
-                present = bool(card_dbg.get("presence"))
-                if present and not stop_latched and processed >= stop_until:
+                # The cue flickers while the robot walks, so the flag needs several
+                # consecutive misses before it drops. A single absent frame used to
+                # re-arm the stop, and the robot crept forward and stopped again.
+                if bool(card_dbg.get("presence")):
+                    card_absent = 0
+                    card_flag = True
+                else:
+                    card_absent += 1
+                    if card_absent >= args.card_clear_calls:
+                        card_flag = False
+                        card_triggered = False
+                # Seeing a card only slows the robot down. Stopping waits until the box
+                # centroid has come down to the trigger line, i.e. the card is close.
+                cy = card_dbg.get("presence_cy_frac")
+                if (card_flag and not card_triggered and cy is not None
+                        and cy >= args.card_trigger_frac):
+                    card_triggered = True
                     stop_until = processed + args.card_stop_ms / 1000.0
-                    stop_latched = True
                     controller.reset()
-                    print(f"[shape] card present -> stand still "
+                    print(f"[shape] box centroid at {cy:.2f} -> stand still "
                           f"{args.card_stop_ms:.0f} ms", flush=True)
-                elif not present:
-                    stop_latched = False
             if card_action != -1 and processed >= card_until:
                 card_action = -1
             vx, wz = controller.command(debug, confidence, processed - previous)
             previous = processed
+            if card_flag and not card_triggered:
+                vx = min(vx, args.card_slow_vx)
             # Two windows, whichever ends later: --card-stop-ms caps how long we wait
             # for a shape that may never settle, --card-hold-ms is the rules' action
             # window once we do know it.

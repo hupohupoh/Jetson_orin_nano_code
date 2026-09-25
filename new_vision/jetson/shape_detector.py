@@ -316,7 +316,7 @@ class ShapeDetector:
                "roi_ratio": self.roi_ratio, "scores": scores[:8],
                "binary": binary, "gray": gray,
                "presence_box": None, "presence_box_work": None,
-               "presence_cue": 0.0}
+               "presence_cue": 0.0, "presence_cy_frac": None}
 
         if best is not None:
             self._cue_hist.append(1)   # 找框成功 = 强存在证据，时间窗记命中
@@ -336,6 +336,10 @@ class ShapeDetector:
             dbg["presence"] = bool(
                 self.armed
                 and dbg["box_top_work"] >= WORK_H * self.cfg["presence_top_frac"])
+            # 框质心在画面纵向的位置（0=顶, 1=底）。调用方拿它当"够近了"的闸门：
+            # 存在信号只说明前面有卡，质心压到下方才说明真的走到跟前了。
+            ys = best[:, 1]
+            dbg["presence_cy_frac"] = float(ys.min() + ys.max()) * 0.5 / WORK_H
         else:
             # 这一帧没有合格框，就是没有图卡 —— 不做兜底猜测。
             # （兜底拿最大连通域的外接矩形硬判形状，既没有触发权，
@@ -360,6 +364,8 @@ class ShapeDetector:
                 # 用最近一次命中框做可视化：累积确认期间框不闪
                 dbg["presence_box_work"], dbg["presence_box"], \
                     dbg["presence_cue"] = self._cue_box
+                ys = self._cue_box[0][:, 1]
+                dbg["presence_cy_frac"] = float(ys.min() + ys.max()) * 0.5 / WORK_H
 
         if shape is None:
             # 这一帧没检出图卡（框没进门槛，或抖动导致漏检）。不清零候选计数
