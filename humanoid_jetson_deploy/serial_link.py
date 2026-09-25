@@ -6,7 +6,10 @@ import threading
 import time
 
 
-from protocol import CommandPacket, FrameDecoder, StatePacket, pack_command
+from protocol import (
+    ActionRequestPacket, ActionStatusPacket, CommandPacket, FrameDecoder,
+    StatePacket, pack_action_request, pack_command,
+)
 
 
 class SerialLink:
@@ -18,6 +21,7 @@ class SerialLink:
         self.decoder = FrameDecoder()
         self._latest_state: StatePacket | None = None
         self._latest_state_host_time = 0.0
+        self._action_status: dict[int, ActionStatusPacket] = {}
         self._lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._stop = threading.Event()
@@ -39,6 +43,11 @@ class SerialLink:
                     with self._lock:
                         self._latest_state = message
                         self._latest_state_host_time = time.monotonic()
+                elif isinstance(message, ActionStatusPacket):
+                    with self._lock:
+                        self._action_status[message.event_id] = message
+                        if len(self._action_status) > 64:
+                            self._action_status.pop(next(iter(self._action_status)))
 
     def wait_for_state(self, timeout_s: float = 3.0) -> StatePacket:
         deadline = time.monotonic() + timeout_s
@@ -98,6 +107,18 @@ class SerialLink:
             self._write_lock.release()
         self._sequence = (self._sequence + 1) & 0xFFFF
         return True
+
+    def send_action(self, event_id: int, action_id: int) -> None:
+        """Send or retry an upper-body event; event_id identifies duplicates."""
+        with self._write_lock:
+            packet = ActionRequestPacket(self._sequence, event_id, action_id)
+            self.serial.write(pack_action_request(packet))
+            self._sequence = (self._sequence + 1) & 0xFFFF
+
+    def get_action_status(self, event_id: int) -> int:
+        with self._lock:
+            packet = self._action_status.get(event_id)
+        return packet.status if packet is not None else 0
 
     def reader_alive(self) -> bool:
         """True while the background reader thread is still running.

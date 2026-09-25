@@ -160,10 +160,15 @@ class ConnectorClient:
         self.address = (host, port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def publish(self, vx, wz, qr=-1):
+    def publish(self, vx, wz, qr=-1, *, event_id=0, event_action=-1):
         if not math.isfinite(vx) or not math.isfinite(wz):
             raise ValueError("velocity must be finite")
         message = {"vx": float(vx), "vy": 0.0, "wz": float(wz), "qr": int(qr)}
+        if event_id:
+            if not 0 < int(event_id) <= 0xFFFFFFFF or int(event_action) not in (1, 2, 3, 4, 5, 6):
+                raise ValueError("invalid shape event")
+            message["event_id"] = int(event_id)
+            message["event_action"] = int(event_action)
         self.socket.sendto(json.dumps(message, separators=(",", ":"),
                                       allow_nan=False).encode("utf-8"), self.address)
 

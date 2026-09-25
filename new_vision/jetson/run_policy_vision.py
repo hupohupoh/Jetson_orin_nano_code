@@ -4,9 +4,10 @@
 Run this entry point for policy walking, not run_robot.py's V2 serial output.
 Only the policy process owns the STM32 serial device.
 
-A detected shape card is reported in the connector's ``qr`` field, 1..6, for
-``--card-hold-ms``. Acting on it is the receiver's business and is not decided
-here; bar crossing is still not signalled.
+A confirmed shape card is reported once as ``event_id``/``event_action`` and
+retained for ``--card-hold-ms`` so the policy receiver can deduplicate it.
+``qr`` describes the current recognition and returns to -1 when absent.
+Bar crossing is still not signalled.
 """
 
 from __future__ import annotations
@@ -67,7 +68,7 @@ def parse_args():
                         help="Skip geometric card detection entirely; qr stays -1")
     parser.add_argument("--card-hold-ms", type=float,
                         default=float(os.getenv("CARD_HOLD_MS", "5000")),
-                        help="Once the shape is identified: keep qr asserted and stay "
+                        help="Once the shape is identified: keep the event available and stay "
                              "stopped this long before resuming speed. 5000 is the rules' "
                              "action window plus margin")
     parser.add_argument("--card-stop-ms", type=float,
@@ -178,11 +179,13 @@ def main():
         last_log = -math.inf
         frames = 0
         card_action = -1
+        card_event_id = 0
         card_until = 0.0
         stop_until = 0.0
         card_flag = False        # a card is in view on this approach
         card_absent = 0          # consecutive detection calls without one
         card_triggered = False   # this card has already been acted on
+        card_action_triggered = False
         card_dbg = {}
         while not stopped:
             now = time.monotonic()
@@ -191,7 +194,9 @@ def main():
             ok, frame = cap.read()
             if not ok:
                 controller.reset()
-                client.publish(0.0, 0.0, card_action)
+                event = ({"event_id": card_event_id, "event_action": card_action}
+                         if card_event_id and now < card_until else {})
+                client.publish(0.0, 0.0, -1, **event)
                 if now - last_log >= 0.5:
                     print("[vision -> connector] camera read failed; vx=0 wz=0", flush=True)
                     last_log = now
@@ -200,6 +205,7 @@ def main():
             _, _, confidence, visualization, debug = detector.process(frame)
             processed = time.monotonic()
             frames += 1
+            recognized_this_frame = False
             # Stopped in front of a card, the camera is steady, so the classification
             # can have every frame. --shape-every only throttles the driving case.
             if shape is not None and (frames % args.shape_every == 0
@@ -207,9 +213,12 @@ def main():
                                       or processed < card_until):
                 action, card_dbg = shape.update(
                     frame, lane_offset_cm=float(debug.get("base_err_cm", 0.0)))
-                if action is not None:
+                if action is not None and not card_action_triggered and card_event_id == 0:
                     card_action = action
+                    card_event_id = max(1, (time.time_ns() // 1_000_000) & 0xFFFFFFFF)
                     card_until = processed + args.card_hold_ms / 1000.0
+                    card_action_triggered = True
+                    recognized_this_frame = True
                     print(f"[shape] qr={action} ({shape_names.get(action, '?')}) "
                           f"held {args.card_hold_ms:.0f} ms", flush=True)
                 # The cue flickers while the robot walks, so the flag needs several
@@ -223,6 +232,7 @@ def main():
                     if card_absent >= args.card_clear_calls:
                         card_flag = False
                         card_triggered = False
+                        card_action_triggered = False
                 # Seeing a card only slows the robot down. Stopping waits until the box
                 # centroid has come down to the trigger line, i.e. the card is close.
                 cy = card_dbg.get("presence_cy_frac")
@@ -235,6 +245,7 @@ def main():
                           f"{args.card_stop_ms:.0f} ms", flush=True)
             if card_action != -1 and processed >= card_until:
                 card_action = -1
+                card_event_id = 0
             vx, wz = controller.command(debug, confidence, processed - previous)
             previous = processed
             if card_flag and not card_triggered:
@@ -244,7 +255,10 @@ def main():
             # window once we do know it.
             if processed < stop_until or processed < card_until:
                 vx, wz = 0.0, 0.0
-            client.publish(vx, wz, card_action)
+            visible_qr = card_action if recognized_this_frame else -1
+            event = ({"event_id": card_event_id, "event_action": card_action}
+                     if card_event_id else {})
+            client.publish(vx, wz, visible_qr, **event)
             if processed - last_log >= 0.5:
                 print(f"[vision -> connector] vx={vx:+.3f} m/s wz={wz:+.3f} rad/s "
                       f"steer={controller.last_steer:+.2f}cm "

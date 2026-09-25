@@ -51,12 +51,20 @@ def process_vision_output(message: dict[str, Any]) -> dict[str, float | int]:
     if qr not in (-1, 1, 2, 3, 4, 5, 6):
         qr = -1
 
-    return {
+    result = {
         "vx": clamp(vx, 0.0, 1.0),
         "vy": 0.0,
         "wz": clamp(wz, -0.5, 0.5),
         "qr": qr,
     }
+    if "event_id" in message or "event_action" in message:
+        event_id = int(message["event_id"])
+        event_action = int(message["event_action"])
+        if not 0 < event_id <= 0xFFFFFFFF or event_action not in (1, 2, 3, 4, 5, 6):
+            raise ValueError("invalid shape event")
+        result["event_id"] = event_id
+        result["event_action"] = event_action
+    return result
 
 
 def select_output(
@@ -102,7 +110,11 @@ class CommandSmoother:
     ) -> dict[str, float | int]:
         self.vx = slew_toward(self.vx, float(target["vx"]), self.max_vx_accel * dt)
         self.wz = slew_toward(self.wz, float(target["wz"]), self.max_wz_accel * dt)
-        return {"vx": self.vx, "vy": 0.0, "wz": self.wz, "qr": int(target["qr"])}
+        output = {"vx": self.vx, "vy": 0.0, "wz": self.wz, "qr": int(target["qr"])}
+        if "event_id" in target:
+            output["event_id"] = int(target["event_id"])
+            output["event_action"] = int(target["event_action"])
+        return output
 
 
 def parse_args() -> argparse.Namespace:

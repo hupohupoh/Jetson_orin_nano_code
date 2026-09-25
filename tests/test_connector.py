@@ -7,6 +7,12 @@ from connector import CommandSmoother, process_vision_output, select_output, sle
 
 
 class ProcessVisionOutputTests(unittest.TestCase):
+    def test_event_metadata_survives_connector_and_smoothing(self) -> None:
+        message = {"vx": 0.0, "wz": 0.0, "qr": -1, "event_id": 77, "event_action": 3}
+        result = process_vision_output(message)
+        self.assertEqual((result["event_id"], result["event_action"]), (77, 3))
+        self.assertEqual(CommandSmoother(1.0, 2.0).update(result, 0.02)["event_id"], 77)
+
     def test_forces_lateral_velocity_to_zero(self) -> None:
         result = process_vision_output({"vx": 0.25, "vy": 0.9, "wz": -0.2, "qr": 3})
         self.assertEqual(result, {"vx": 0.25, "vy": 0.0, "wz": -0.2, "qr": 3})

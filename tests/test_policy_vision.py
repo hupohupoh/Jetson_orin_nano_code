@@ -160,6 +160,50 @@ class SmoothedStopReachesThePolicyTests(unittest.TestCase):
 
 
 class VisionEntryPointTests(unittest.TestCase):
+    def test_visible_card_cannot_restart_after_classifier_cooldown(self):
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        camera = Mock()
+        camera.isOpened.return_value = True
+        camera.get.side_effect = [1280, 720]
+        detector = Mock()
+        detector.process.return_value = (0, 0, 0.8, None, detection())
+        shape = Mock()
+        shape.action_map = {"square": 3}
+        reads = [0]
+        clock = [0.0]
+
+        def read():
+            reads[0] += 1
+            clock[0] += 0.1
+            if reads[0] > 60:
+                run_policy_vision.signal.signal.call_args.args[1](None, None)
+                return False, None
+            return True, frame
+
+        camera.read.side_effect = read
+        shape.update.side_effect = lambda *a, **k: (
+            3 if reads[0] in (2, 35) else None,
+            {"presence": True, "presence_cy_frac": 0.9},
+        )
+        with (
+            patch("sys.argv", ["run_policy_vision.py", "--headless",
+                               "--shape-every", "1", "--card-hold-ms", "5000"]),
+            patch.object(run_policy_vision.signal, "signal"),
+            patch.object(run_policy_vision, "ConnectorClient") as client_cls,
+            patch("utils.open_camera", return_value=camera),
+            patch("line_detector_v1_warp.LineDetector", return_value=detector),
+            patch("shape_detector.ShapeDetector", return_value=shape),
+            patch.object(run_policy_vision.time, "monotonic", lambda: clock[0]),
+            patch("cv2.imshow", side_effect=AssertionError("headless must not open windows")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(run_policy_vision.main(), 0)
+        published = client_cls.return_value.publish.call_args_list
+        self.assertEqual(len({call.kwargs["event_id"] for call in published
+                              if "event_id" in call.kwargs}), 1)
+        self.assertNotIn("event_id", published[-1].kwargs)
+        self.assertEqual(published[-1].args[2], -1)
+
     def test_headless_runner_publishes_detection_and_zero_on_capture_failure(self):
         frame = np.zeros((720, 1280, 3), dtype=np.uint8)
         camera = Mock()
@@ -167,12 +211,17 @@ class VisionEntryPointTests(unittest.TestCase):
         camera.get.side_effect = [1280, 720]
         detector = Mock()
         detector.process.return_value = (0, 0, 0.8, None, detection())
+        clock = [0.0]
+        def tick():
+            clock[0] += 0.03
+            return clock[0]
         with (
             patch("sys.argv", ["run_policy_vision.py", "--headless", "--no-shape-detect"]),
             patch.object(run_policy_vision.signal, "signal") as signals,
             patch.object(run_policy_vision, "ConnectorClient") as client_cls,
             patch("utils.open_camera", return_value=camera),
             patch("line_detector_v1_warp.LineDetector", return_value=detector),
+            patch.object(run_policy_vision.time, "monotonic", side_effect=tick),
             patch("cv2.imshow", side_effect=AssertionError("headless must not open windows")),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -180,21 +229,21 @@ class VisionEntryPointTests(unittest.TestCase):
             def read():
                 nonlocal reads
                 reads += 1
-                if reads == 1:
+                if reads <= 3:
                     return True, frame
                 signals.call_args.args[1](None, None)
                 return False, None
             camera.read.side_effect = read
             self.assertEqual(run_policy_vision.main(), 0)
             calls = client_cls.return_value.publish.call_args_list
-            self.assertEqual(len(calls), 2)
-            self.assertEqual(calls[0].args[0], 0.4)
-            self.assertNotEqual(calls[0].args[1], 0.0)  # steering published; polarity is yaw-sign's business
-            self.assertEqual(calls[1].args, (0, 0, -1))
+            self.assertEqual(len(calls), 4)
+            self.assertEqual(calls[2].args[0], 0.4)
+            self.assertNotEqual(calls[2].args[1], 0.0)  # steering published after median warmup
+            self.assertEqual(calls[3].args, (0.0, 0.0, -1))
             client_cls.return_value.close.assert_called_once()
             camera.release.assert_called_once()
 
-    def test_card_detection_publishes_qr_and_holds_it(self):
+    def test_card_event_is_held_but_qr_clears_when_card_disappears(self):
         frame = np.zeros((720, 1280, 3), dtype=np.uint8)
         camera = Mock()
         camera.isOpened.return_value = True
@@ -226,8 +275,12 @@ class VisionEntryPointTests(unittest.TestCase):
             camera.read.side_effect = read
             self.assertEqual(run_policy_vision.main(), 0)
             published = [c.args[2] for c in client_cls.return_value.publish.call_args_list]
-            # Detected on frame 1; still asserted on frames 2, 3 and the frame-read failure.
-            self.assertEqual(published, [3, 3, 3, 3])
+            # qr reports the current recognition; the event is retained for delivery.
+            self.assertEqual(published, [3, -1, -1, -1])
+            events = [call.kwargs for call in client_cls.return_value.publish.call_args_list]
+            self.assertGreater(events[0]["event_id"], 0)
+            self.assertTrue(all(event["event_id"] == events[0]["event_id"] for event in events))
+            self.assertTrue(all(event["event_action"] == 3 for event in events))
             # Identifying starts the action window, so it stands from that frame on.
             for call in client_cls.return_value.publish.call_args_list:
                 self.assertEqual(call.args[:2], (0.0, 0.0))
@@ -287,7 +340,7 @@ class VisionEntryPointTests(unittest.TestCase):
                        if i > 1 and call.args[0] > 0.0)
         self.assertIn(resumed, (51, 52, 53))
         self.assertEqual(published[resumed - 1].args[:2], (0.0, 0.0))
-        self.assertEqual(published[resumed - 1].args[2], 3)   # still holding
+        self.assertEqual(published[resumed - 1].kwargs["event_action"], 3)
         self.assertEqual(published[resumed].args[2], -1)      # released with the resume
 
     def test_a_distant_card_only_slows_down_and_a_flicker_does_not_re_trigger(self):
@@ -384,6 +437,16 @@ class UdpIntegrationTests(unittest.TestCase):
                     projected_gravity=np.array([0, 0, -1]), velocity_command=source.get(),
                     joint_position_policy=config.Q_DEFAULT, joint_velocity_policy=np.zeros(12))
             np.testing.assert_allclose(observation()[9:13], [0.4, -0.1, config.DEFAULT_STEP_DISTANCE, 0])
+            # A confirmed event crosses both UDP hops even when qr has returned to -1.
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                client.publish(0.0, 0.0, -1, event_id=12345, event_action=5)
+                if source.get_snapshot().event_id == 12345:
+                    break
+                time.sleep(0.01)
+            snapshot = source.get_snapshot()
+            self.assertEqual((snapshot.qr, snapshot.event_id, snapshot.event_action), (-1, 12345, 5))
+            wait_for(expected, publish=True)
             # Malformed traffic must neither kill the connector nor renew vision freshness.
             client.socket.sendto(b'{"vx":0.4,"wz":0.2,"qr":Infinity}', client.address)
             wait_for([0, 0, 0])

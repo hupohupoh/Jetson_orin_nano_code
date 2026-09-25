@@ -27,14 +27,15 @@ The communication is the earlier working UDP JSON path (see historical commit
 | Connector → policy | `127.0.0.1:5005` | Same fields; republished at 50 Hz |
 | Policy ↔ STM32 | e.g. `/dev/ttyACM0` | Existing binary state/joint-command protocol |
 
-`vx` is m/s; `wz` is rad/s; `vy` is always zero. `qr=-1` preserves the old
-schema; it does not represent a geometric-shape detection. Both UDP stages
+`vx` is m/s; `wz` is rad/s; `vy` is always zero. `qr=-1` means no current
+confirmed shape observation. A confirmed card also carries `event_id` and
+`event_action` during the stop window. Both UDP stages
 retain the existing `vx=0..1` and `wz=-0.5..0.5` clamps.
 
-This entry point is for line-following walking. It reports a detected shape card
-in the connector's `qr` field but does **not** stop for it or perform any card
-action - that is the receiver's decision and nothing downstream reads `qr`
-today. Bar crossing is not signalled either. The original CPU/GPU `run_robot.py`
+This entry point is for line-following walking and stops for a confirmed card.
+When the policy is launched with `--one-foot-model`, it routes the six card
+actions as described in [shape action deployment](shape_action_deployment.md).
+Bar crossing is not signalled. The original CPU/GPU `run_robot.py`
 entry points still produce V2 serial messages and are not the policy bridge.
 Only the policy process should open the STM32 serial device.
 
@@ -57,8 +58,9 @@ speed to `--card-slow-vx`, and rolls on until the box centroid reaches
 card is actually close. Only then does it stop, and detection then runs **every
 frame** instead of every `--shape-every`. Standing still the camera is steady,
 the quad path works, and the shape comes out of the tuned classifier - the one
-that is not to be touched. When the shape is known, `qr` is published and the
-robot holds for `--card-hold-ms` (the rules' action window) before resuming.
+that is not to be touched. When the shape is known, a numbered event is
+published and the vision command remains stopped for `--card-hold-ms`.
+The policy process also holds zero velocity until the action completes.
 
 The flag clears only after `--card-clear-calls` (4) consecutive detection calls
 with no card, and that counter is also what makes the trigger once-per-card. One
