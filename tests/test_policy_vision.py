@@ -228,12 +228,58 @@ class VisionEntryPointTests(unittest.TestCase):
             published = [c.args[2] for c in client_cls.return_value.publish.call_args_list]
             # Detected on frame 1; still asserted on frames 2, 3 and the frame-read failure.
             self.assertEqual(published, [3, 3, 3, 3])
-            # Velocity is untouched: the card is reported, not acted on.
-            first, dropped = client_cls.return_value.publish.call_args_list[0], \
-                client_cls.return_value.publish.call_args_list[3]
-            self.assertEqual(first.args[0], 0.4)
-            self.assertEqual(dropped.args[:2], (0.0, 0.0))
+            # Identifying starts the action window, so it stands from that frame on.
+            for call in client_cls.return_value.publish.call_args_list:
+                self.assertEqual(call.args[:2], (0.0, 0.0))
             self.assertEqual(shape.update.call_args_list[0].kwargs["lane_offset_cm"], 0.0)
+
+    def test_speed_resumes_only_after_the_hold_window(self):
+        """A box stops it; naming the shape opens --card-hold-ms; then it drives again."""
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        camera = Mock()
+        camera.isOpened.return_value = True
+        camera.get.side_effect = [1280, 720]
+        detector = Mock()
+        detector.process.return_value = (0, 0, 0.8, None, detection())
+        seen = {"card": False}
+        shape = Mock()
+        shape.action_map = {"square": 3}
+        shape.update.side_effect = lambda *a, **k: (
+            (3, {"presence": True}) if seen["card"] else (None, {"presence": False}))
+        clock = [0.0]
+        reads = [0]
+
+        def read():
+            reads[0] += 1
+            clock[0] += 0.1                      # 10 Hz vision
+            seen["card"] = 1 < reads[0] < 4      # present on frames 2 and 3 only
+            return reads[0] <= 200, frame
+
+        camera.read.side_effect = read
+        with (
+            patch("sys.argv", ["run_policy_vision.py", "--headless", "--shape-every", "1",
+                               "--card-hold-ms", "5000", "--card-stop-ms", "3000"]),
+            patch.object(run_policy_vision.signal, "signal"),
+            patch.object(run_policy_vision, "ConnectorClient") as client_cls,
+            patch("utils.open_camera", return_value=camera),
+            patch("line_detector_v1_warp.LineDetector", return_value=detector),
+            patch("shape_detector.ShapeDetector", return_value=shape),
+            patch.object(run_policy_vision.time, "monotonic", lambda: clock[0]),
+            patch("cv2.imshow", side_effect=AssertionError("headless must not open windows")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(run_policy_vision.main(), 0)
+        published = client_cls.return_value.publish.call_args_list
+        # frame 1 drives; frame 2 sees the box and names it, so the window opens at t=0.2
+        self.assertEqual(published[0].args[:2], (0.4, published[0].args[1]))
+        self.assertEqual(published[0].args[2], -1)
+        self.assertEqual(published[1].args[:2], (0.0, 0.0))
+        self.assertEqual(published[1].args[2], 3)
+        # still standing just before t=5.2, driving again just after
+        self.assertEqual(published[50].args[:2], (0.0, 0.0))
+        self.assertEqual(published[51].args[2], 3)
+        self.assertGreater(published[52].args[0], 0.0)
+        self.assertEqual(published[52].args[2], -1)
 
     def test_real_new_detector_reports_blank_frame_as_lost(self):
         from line_detector_v1_warp import LineDetector
