@@ -66,16 +66,15 @@ def parse_args():
     parser.add_argument("--no-shape-detect", action="store_true",
                         help="Skip geometric card detection entirely; qr stays -1")
     parser.add_argument("--card-hold-ms", type=float,
-                        default=float(os.getenv("CARD_HOLD_MS", "3000")),
-                        help="How long qr keeps reporting an identified card. 3000 matches "
-                             "the rules' action window; acting on it is the receiver's "
-                             "business. Keep it under ShapeDetector cooldown_ms so cards "
-                             "cannot re-fire")
+                        default=float(os.getenv("CARD_HOLD_MS", "5000")),
+                        help="Once the shape is identified: keep qr asserted and stay "
+                             "stopped this long before resuming speed. 5000 is the rules' "
+                             "action window plus margin")
     parser.add_argument("--card-stop-ms", type=float,
                         default=float(os.getenv("CARD_STOP_MS", "3000")),
-                        help="Stand still this long as soon as a card-sized box appears, "
-                             "before the shape is known - the box is easy to see, the shape "
-                             "is not. Detection then runs every frame while stopped. "
+                        help="Stand still at most this long waiting for the shape to "
+                             "settle, counted from the moment a card-sized box appeared. "
+                             "Bounds the wait when no shape is ever identified. "
                              "0 disables stopping")
     parser.add_argument("--shape-every", type=int,
                         default=max(1, int(os.getenv("SHAPE_EVERY", "6"))),
@@ -182,7 +181,8 @@ def main():
             # Stopped in front of a card, the camera is steady, so the classification
             # can have every frame. --shape-every only throttles the driving case.
             if shape is not None and (frames % args.shape_every == 0
-                                      or processed < stop_until):
+                                      or processed < stop_until
+                                      or processed < card_until):
                 action, card_dbg = shape.update(
                     frame, lane_offset_cm=float(debug.get("base_err_cm", 0.0)))
                 if action is not None:
@@ -205,7 +205,10 @@ def main():
                 card_action = -1
             vx, wz = controller.command(debug, confidence, processed - previous)
             previous = processed
-            if processed < stop_until:
+            # Two windows, whichever ends later: --card-stop-ms caps how long we wait
+            # for a shape that may never settle, --card-hold-ms is the rules' action
+            # window once we do know it.
+            if processed < stop_until or processed < card_until:
                 vx, wz = 0.0, 0.0
             client.publish(vx, wz, card_action)
             if processed - last_log >= 0.5:
