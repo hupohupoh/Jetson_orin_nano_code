@@ -31,8 +31,13 @@ import numpy as np
 
 import config
 from motor_test_common import CONTROL_DT, monotonic_us
-from protocol import COMMAND_ENABLE, COMMAND_ESTOP, STATE_MOTORS_ENABLED
-from read_joint_angles import validate_state
+from protocol import (
+    COMMAND_ENABLE,
+    COMMAND_ESTOP,
+    STATE_ENCODERS_VALID,
+    STATE_FAULT,
+    STATE_MOTORS_ENABLED,
+)
 
 if TYPE_CHECKING:
     from serial_link import SerialLink
@@ -76,6 +81,19 @@ JOINT_MARGIN_RAD = config.JOINT_LIMIT_MARGIN_RAD
 
 class FaultError(RuntimeError):
     """A condition that must stop motion and de-energize the motors."""
+
+
+def validate_state(state, *, context: str = "state") -> None:
+    """Reject faulty or non-finite encoder feedback before commanding motion."""
+    if state.status_flags & STATE_FAULT:
+        raise RuntimeError(f"STM32 reports a motor fault: flags=0x{state.status_flags:08X}")
+    if not state.status_flags & STATE_ENCODERS_VALID:
+        raise RuntimeError(
+            f"STM32 encoder-valid flag is missing on {context}: "
+            f"flags=0x{state.status_flags:08X}"
+        )
+    if not np.isfinite(state.joint_position).all():
+        raise RuntimeError(f"STM32 joint position contains NaN or Inf on {context}")
 
 
 # --- pure math ---------------------------------------------------------------
@@ -250,7 +268,7 @@ class Keypoint:
 
 
 def load_keypoints(path) -> list[Keypoint]:
-    """Read a ``keypoints.json`` written by ``read_joint_angles`` or the GUI.
+    """Read a ``keypoints.json`` containing named policy-angle poses.
 
     Rejects a file whose ``joint_names`` disagree with this checkout. That field
     exists for exactly this check: the repo has two competing joint orders, and

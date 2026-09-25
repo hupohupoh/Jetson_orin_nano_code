@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 logs/
 /old_vision/
+/local_joint_angle_readback/
