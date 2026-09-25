@@ -21,6 +21,7 @@ for extra in (DEPLOY_DIR, DEPLOY_DIR / "tools"):
 
 import config  # noqa: E402
 from protocol import (  # noqa: E402
+    COMMAND_ENABLE,
     FrameDecoder,
     STATE_ENCODERS_VALID,
     STATE_FAULT,
@@ -253,9 +254,49 @@ class StreamLoggerTests(unittest.TestCase):
             self.assertEqual(command_flags, 0)
             self.assertEqual((kp_scale, kd_scale), (0.0, 0.0))
 
+    def test_zero_gain_readback_enables_feedback_and_disables_on_close(self):
+        link = FakeLink(config.Q_DEFAULT)
+        logger = StreamLogger(link, self.path, 0.0, True, zero_gain_readback=True)
+        logger.start()
+        time.sleep(0.08)
+        logger.close()
+        self.assertTrue(any(frame[3] == COMMAND_ENABLE for frame in link.sent))
+        self.assertEqual(link.sent[-1][3], 0)
+        for _, kp_scale, kd_scale, _ in link.sent:
+            self.assertEqual((kp_scale, kd_scale), (0.0, 0.0))
+
+    def test_zero_gain_readback_latches_off_after_telemetry_loss(self):
+        class LostFeedbackLink(FakeLink):
+            failed_once = False
+            reads_after_enable = 0
+
+            def get_latest_state(self, max_age_s=0.05):
+                if any(frame[3] == COMMAND_ENABLE for frame in self.sent):
+                    self.reads_after_enable += 1
+                    if self.reads_after_enable == 2 and not self.failed_once:
+                        self.failed_once = True
+                        raise TimeoutError("telemetry lost")
+                return super().get_latest_state(max_age_s=max_age_s)
+
+        link = LostFeedbackLink(config.Q_DEFAULT, limit=10_000_000)
+        logger = StreamLogger(link, self.path, 0.0, True, zero_gain_readback=True)
+        logger.start()
+        time.sleep(0.12)
+        stopped_before_close = logger._stop.is_set()
+        logger.close()
+        flags = [frame[3] for frame in link.sent]
+        self.assertTrue(stopped_before_close)
+        self.assertIn(COMMAND_ENABLE, flags)
+        self.assertEqual(flags[-1], 0)
+        self.assertNotIn(COMMAND_ENABLE, flags[flags.index(0, flags.index(COMMAND_ENABLE)):])
+
     def test_no_keepalive_sends_nothing(self):
         link, _ = self._run_logger(log_hz=200, seconds=0.05, keepalive=False)
         self.assertEqual(link.sent, [])
+
+    def test_readback_option_is_explicit(self):
+        self.assertFalse(parse_args([]).zero_gain_readback)
+        self.assertTrue(parse_args(["--zero-gain-readback"]).zero_gain_readback)
 
 
 class PromptLoopTests(unittest.TestCase):
@@ -302,6 +343,13 @@ class PromptLoopTests(unittest.TestCase):
     def test_quit_exits_without_saving(self):
         code, _ = self._run(["q", ""])
         self.assertEqual(code, 0)
+        self.assertEqual(len(self.store), 0)
+
+    def test_readback_fault_prevents_saving_stale_keypoint(self):
+        session = CaptureSession(FakeLink(config.Q_DEFAULT))
+        stream = type("FailedStream", (), {"fault": "telemetry lost"})()
+        code = run_prompt_loop(session, self.store, self.args, feed_inputs([""]), stream=stream)
+        self.assertEqual(code, 1)
         self.assertEqual(len(self.store), 0)
 
 

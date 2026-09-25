@@ -2,9 +2,10 @@
 """Record STM32 joint angles: a continuous stream plus named key points.
 
 Before the first state, this tool sends disabled probe frames unless
-``--no-keepalive`` is selected. Every frame it sends carries
-``command_flags=0`` and zero gains, so you can position the robot by hand,
-then press Enter to capture the pose.
+``--no-keepalive`` is selected. Default keep-alives carry ``command_flags=0``.
+``--zero-gain-readback`` explicitly requests motor enable on firmware whose
+motor gains are independently verified to be zero, allowing CAN feedback while
+the robot is positioned by hand.
 
 Two files are written per session, in joint order ``config.JOINT_NAMES`` (the
 order the policy model is loaded with):
@@ -40,7 +41,7 @@ if str(DEPLOY_DIR) not in sys.path:
 
 import config  # noqa: E402
 from motor_test_common import monotonic_us  # noqa: E402
-from protocol import STATE_ENCODERS_VALID, STATE_FAULT  # noqa: E402
+from protocol import COMMAND_ENABLE, STATE_ENCODERS_VALID, STATE_FAULT  # noqa: E402
 
 if TYPE_CHECKING:
     from serial_link import SerialLink
@@ -95,11 +96,15 @@ class StreamLogger:
     command watchdog stays fed during that wait.
     """
 
-    def __init__(self, link: "SerialLink", path: Path, log_hz: float, keepalive: bool) -> None:
+    def __init__(self, link: "SerialLink", path: Path, log_hz: float, keepalive: bool,
+                 zero_gain_readback: bool = False) -> None:
         self.link = link
         self.path = path
         self.log_hz = log_hz
         self.keepalive = keepalive
+        self.zero_gain_readback = zero_gain_readback
+        self._enabled = False
+        self.fault: str | None = None
         self.rows = 0
         self._file = None
         self._writer = None
@@ -132,16 +137,35 @@ class StreamLogger:
             # stays clear, so the motors cannot move.
             if self.keepalive and self._last_state is not None and now >= self._next_keepalive:
                 try:
+                    target = self._last_state.joint_position
+                    flags = 0
+                    if self.zero_gain_readback:
+                        fresh = self.link.get_latest_state(max_age_s=0.1)
+                        validate_state(fresh, context="readback")
+                        target = fresh.joint_position
+                        flags = COMMAND_ENABLE
                     self.link.send_command(
-                        monotonic_us(), self._last_state.joint_position, 0.0, 0.0, 0
+                        monotonic_us(), target, 0.0, 0.0, flags
                     )
+                    self._enabled = bool(flags)
+                except (TimeoutError, RuntimeError) as exc:
+                    if self._enabled:
+                        self._send_disable()
+                        self.fault = str(exc)
+                        print(f"READBACK FAULT: {exc}; motor enable cleared")
+                        self._stop.set()
                 except Exception:  # noqa: BLE001 - a dropped keep-alive is not fatal
                     pass
                 self._next_keepalive = max(now, self._next_keepalive) + 1.0 / KEEPALIVE_HZ
 
             try:
                 state = self.link.get_latest_state(max_age_s=0.5)
-            except TimeoutError:
+            except TimeoutError as exc:
+                if self._enabled:
+                    self._send_disable()
+                    self.fault = str(exc)
+                    print(f"READBACK FAULT: {exc}; motor enable cleared")
+                    self._stop.set()
                 time.sleep(0.01)
                 continue
             if state.sequence == self._last_sequence:
@@ -171,8 +195,20 @@ class StreamLogger:
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(timeout=0.5)
+        if self._enabled:
+            self._send_disable()
         if self._file is not None and not self._file.closed:
             self._file.close()
+
+    def _send_disable(self) -> None:
+        target = (self._last_state.joint_position if self._last_state is not None
+                  else np.zeros(config.NUM_JOINTS, dtype=np.float32))
+        for _ in range(3):
+            try:
+                self.link.send_command(monotonic_us(), target, 0.0, 0.0, 0)
+            except Exception:  # noqa: BLE001 - attempt remaining stop frames
+                continue
+        self._enabled = False
 
 
 class KeypointStore:
@@ -371,6 +407,7 @@ def run_prompt_loop(
     store: KeypointStore,
     args: argparse.Namespace,
     input_fn=None,
+    stream: StreamLogger | None = None,
 ) -> int:
     """Prompt for names; each Enter captures and stores a key point.
 
@@ -392,6 +429,9 @@ def run_prompt_loop(
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
+        if stream is not None and stream.fault is not None:
+            print(f"  readback stopped: {stream.fault}")
+            return 1
         command = answer.strip()
         lowered = command.lower()
         if lowered in QUIT_COMMANDS:
@@ -441,6 +481,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Send no frames at all; every keep-alive already has the enable bit clear",
     )
+    parser.add_argument(
+        "--zero-gain-readback", action="store_true",
+        help="Opt in only for firmware verified to use zero motor KP/KD: enable motor "
+             "feedback while commanding the measured pose",
+    )
     return parser.parse_args(argv)
 
 
@@ -454,6 +499,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--timeout must be positive")
     if args.log_hz < 0.0:
         raise SystemExit("--log-hz cannot be negative")
+    if args.zero_gain_readback and args.no_keepalive:
+        raise SystemExit("--zero-gain-readback cannot be combined with --no-keepalive")
 
     # Keep --help and the offline tests usable without pyserial; the hardware
     # dependency is only needed once a serial device is actually opened.
@@ -465,10 +512,15 @@ def main(argv: list[str] | None = None) -> int:
     keypoints_path = session_dir / "keypoints.json"
 
     print(f"Opening {args.port} (line coding {args.baud})")
-    print("Motors stay disabled: every frame this tool sends has command_flags=0")
+    if args.zero_gain_readback:
+        print("ZERO-GAIN READBACK: sending COMMAND_ENABLE=1 after first state; "
+              "use only with firmware verified to apply KP=KD=0")
+    else:
+        print("Motors stay disabled: every frame this tool sends has command_flags=0")
 
     link = SerialLink(args.port, args.baud)
-    stream = StreamLogger(link, stream_path, args.log_hz, not args.no_keepalive)
+    stream = StreamLogger(link, stream_path, args.log_hz, not args.no_keepalive,
+                          zero_gain_readback=args.zero_gain_readback)
     store = KeypointStore(
         keypoints_path,
         {
@@ -491,7 +543,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Continuous stream: {stream_path.name} at {args.log_hz:g} Hz")
         print(f"Key points:        {keypoints_path.name}")
 
-        run_prompt_loop(session, store, args)
+        if run_prompt_loop(session, store, args, stream=stream) != 0 or stream.fault is not None:
+            return 1
     except Exception as exc:  # noqa: BLE001 - surface firmware faults as one line
         print(f"FAIL: {exc}")
         return 1
