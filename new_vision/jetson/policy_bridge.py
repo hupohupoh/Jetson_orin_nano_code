@@ -28,7 +28,7 @@ class SteeringController:
     DERIV_NOMINAL_DT = 0.05  # nominal vision frame period, seconds
 
     def __init__(self, vx=0.4, max_wz=0.5, steer_full_scale_cm=10.0,
-                 yaw_sign=1, step_len_cm=8.0, preview_gain=1.0,
+                 yaw_sign=1, step_len_cm=8.0, preview_gain=0.0,
                  straight_gains=(0.83, 0.004, 0.095),
                  curve_gains=(0.83, 0.006, 0.16), integral_limit=60.0,
                  lost_hold_s=0.2, deriv_pole=0.78, bias_cm=0.0, bias_gate_px=12.0):

@@ -53,9 +53,9 @@ class SteeringTests(unittest.TestCase):
     def test_default_preview_is_off(self):
         """A centred robot must not be steered by the heading angle alone.
 
-        The measured angle carries a one-sided bias of about 20 deg. At the old
-        default preview_gain 4 that became 4*8*sin(20 deg) = 10.9 cm of steer -
-        full scale on its own, with the lateral error at zero.
+        On a curve the measured angle sits near +22 deg. At the old default
+        preview_gain 4 that is 4*8*sin(22 deg) = 12 cm of steer - past the 10 cm
+        full scale, with the lateral error at zero.
         """
         controller = SteeringController()
         self.assertEqual(controller.command(detection(0.0, 22.0), 0.8, 0.02)[1], 0.0)
